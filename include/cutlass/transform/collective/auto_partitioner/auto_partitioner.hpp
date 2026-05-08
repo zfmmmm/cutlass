@@ -1,7 +1,9 @@
 #pragma once
+#include <type_traits>
+
 #include <cute/tensor.hpp>
 #include <cutlass/arch/arch.h>
-#include <cutlass/gemm/collective/builders/sm90_common.inl>
+#include <cutlass/arch/mma.h>
 
 namespace autopartition
 {
