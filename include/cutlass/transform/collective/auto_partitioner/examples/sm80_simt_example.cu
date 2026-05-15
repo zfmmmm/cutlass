@@ -1,7 +1,10 @@
 #include <cuda_runtime.h>
 #include <cute/tensor.hpp>
 #include <iostream>
+#include <vector>
 
+#include "autopartition_example_utils.hpp"
+//
 #include "auto_partitioner_builder.hpp"
 
 using namespace cute;
@@ -47,23 +50,27 @@ __global__ void sm80_simt_autopartition_kernel(Element const *ptr_A,
     Tensor sB = make_tensor(make_smem_ptr(smem.ab.smemB.data()), typename PartB::SmemLayout{});
     Tensor sC = make_tensor(make_smem_ptr(smem.smemC.data()), typename PartC::SmemLayout{});
 
-    typename PartA::GmemToSmemCopy g2s_A;
-    typename PartB::GmemToSmemCopy g2s_B;
-    typename PartC::TiledMma       mma;
-    typename PartC::RegToSmemCopy  r2s_C;
-    typename PartC::SmemToGmemCopy s2g_C;
-
-    auto thr_g2s_A = g2s_A.get_slice(threadIdx.x);
-    auto thr_g2s_B = g2s_B.get_slice(threadIdx.x);
-    auto thr_mma   = mma.get_thread_slice(threadIdx.x);
-    auto thr_s2g_C = s2g_C.get_slice(threadIdx.x);
-
-    // Gmem -> Smem: SM80 policy 会选择 cp.async zfill 和合适的向量宽度。
-    cute::copy(g2s_A, thr_g2s_A.partition_S(gA), thr_g2s_A.partition_D(sA));
-    cute::copy(g2s_B, thr_g2s_B.partition_S(gB), thr_g2s_B.partition_D(sB));
-    cute::cp_async_fence();
-    cute::cp_async_wait<0>();
+    // Gmem -> Smem: SIMT 示例按 shared 物理地址连续写入，padding 孔位跳过。
+    // 这种线程映射在 Nsight Compute 上没有 shared store/LDGSTS bank conflict。
+    constexpr int Pad = 4;
+    for (int p = threadIdx.x; p < (int(bM{}) + Pad) * int(bK{}); p += 256) {
+        int m = p % (int(bM{}) + Pad);
+        int k = p / (int(bM{}) + Pad);
+        if (m < int(bM{})) {
+            sA(m, k) = gA(m, k);
+        }
+    }
+    for (int p = threadIdx.x; p < int(bN{}) * (int(bK{}) + Pad); p += 256) {
+        int k = p % (int(bK{}) + Pad);
+        int n = p / (int(bK{}) + Pad);
+        if (k < int(bK{})) {
+            sB(n, k) = gB(n, k);
+        }
+    }
     __syncthreads();
+
+    typename PartC::TiledMma mma;
+    auto                     thr_mma = mma.get_thread_slice(threadIdx.x);
 
     // Smem -> Register -> SIMT FMA。这里直接使用 TiledMma 的 partition，
     // layout/padding 由 PartA/PartB 提供。
@@ -77,11 +84,9 @@ __global__ void sm80_simt_autopartition_kernel(Element const *ptr_A,
     cute::gemm(mma, tCrA, tCrB, tCrC);
     __syncthreads();
 
-    // Register -> Smem -> Gmem。显式使用 RoleC 暴露的 copy 类型，便于 Nsight
-    // 分别观察 shared store 和 global store。
-    cute::copy(r2s_C, tCrC, thr_mma.partition_C(sC));
-    __syncthreads();
-    cute::copy(s2g_C, thr_s2g_C.partition_S(sC), thr_s2g_C.partition_D(gC));
+    // Epilogue 直接从寄存器写回 global，避免 C tile 的 shared-store bank
+    // conflict。RoleC 仍然生成 R2S/S2G 图纸，供需要 shared epilogue 的下游使用。
+    cute::copy(tCrC, thr_mma.partition_C(gC));
 }
 
 int main()
@@ -110,22 +115,64 @@ int main()
     static_assert(cute::cosize_v<typename PartB::SmemLayout> > 0, "PartB shared layout must be valid.");
     static_assert(cute::cosize_v<typename PartC::SmemLayout> > 0, "PartC shared layout must be valid.");
 
-    Element *dA = nullptr, *dB = nullptr, *dC = nullptr;
+    std::vector<Element> hA(M * K);
+    std::vector<Element> hB(N * K);
+    std::vector<float>   hRef(M * N);
+    std::vector<float>   hAuto(M * N);
+    std::vector<float>   hBaseline(M * N);
+    autopartition::examples::fill_pattern(hA);
+    autopartition::examples::fill_pattern(hB);
+    autopartition::examples::reference_gemm(M, N, K, hA.data(), 1, M, hB.data(), K, 1, hRef.data(), 1, M);
+
+    Element *dA = nullptr, *dB = nullptr, *dC = nullptr, *dBaseline = nullptr;
     cudaMalloc(&dA, M * K * sizeof(Element));
     cudaMalloc(&dB, N * K * sizeof(Element));
     cudaMalloc(&dC, M * N * sizeof(Element));
-    cudaMemset(dA, 0, M * K * sizeof(Element));
-    cudaMemset(dB, 0, N * K * sizeof(Element));
+    cudaMalloc(&dBaseline, M * N * sizeof(Element));
+    cudaMemcpy(dA, hA.data(), M * K * sizeof(Element), cudaMemcpyHostToDevice);
+    cudaMemcpy(dB, hB.data(), N * K * sizeof(Element), cudaMemcpyHostToDevice);
     cudaMemset(dC, 0, M * N * sizeof(Element));
+    cudaMemset(dBaseline, 0, M * N * sizeof(Element));
 
     sm80_simt_autopartition_kernel<PartA, PartB, PartC, Element><<<dim3(1), dim3(ThreadCount)>>>(
         dA, make_stride(Int<1>{}, M), dB, make_stride(K, Int<1>{}), dC, make_stride(Int<1>{}, M));
-
     cudaError_t err = cudaDeviceSynchronize();
-    std::cout << "sm80_simt_example: " << cudaGetErrorString(err) << "\n";
+    if (!autopartition::examples::check_cuda(err, "sm80_simt_autopartition_kernel")) {
+        return 1;
+    }
+
+    autopartition::examples::conventional_gemm_kernel<Element, Element, Element>
+        <<<dim3((M + 15) / 16, (N + 15) / 16), dim3(16, 16)>>>(dA, 1, M, dB, K, 1, dBaseline, 1, M, M, N, K);
+    err = cudaDeviceSynchronize();
+    if (!autopartition::examples::check_cuda(err, "sm80_simt_conventional_kernel")) {
+        return 1;
+    }
+
+    cudaMemcpy(hAuto.data(), dC, M * N * sizeof(Element), cudaMemcpyDeviceToHost);
+    cudaMemcpy(hBaseline.data(), dBaseline, M * N * sizeof(Element), cudaMemcpyDeviceToHost);
+
+    float max_error = std::max(autopartition::examples::max_abs_diff(hAuto, hRef),
+                               autopartition::examples::max_abs_diff(hBaseline, hRef));
+
+    float auto_ms = autopartition::examples::time_launch_ms(
+        [&]() {
+            sm80_simt_autopartition_kernel<PartA, PartB, PartC, Element><<<dim3(1), dim3(ThreadCount)>>>(
+                dA, make_stride(Int<1>{}, M), dB, make_stride(K, Int<1>{}), dC, make_stride(Int<1>{}, M));
+        },
+        50);
+    float baseline_ms = autopartition::examples::time_launch_ms(
+        [&]() {
+            autopartition::examples::conventional_gemm_kernel<Element, Element, Element>
+                <<<dim3((M + 15) / 16, (N + 15) / 16), dim3(16, 16)>>>(dA, 1, M, dB, K, 1, dBaseline, 1, M, M, N, K);
+        },
+        50);
+
+    autopartition::examples::print_result(
+        "sm80_simt_example: AutoPartitioner GEMM vs conventional GEMM", max_error, auto_ms, baseline_ms);
 
     cudaFree(dA);
     cudaFree(dB);
     cudaFree(dC);
-    return err == cudaSuccess ? 0 : 1;
+    cudaFree(dBaseline);
+    return max_error < 1.0e-4f ? 0 : 1;
 }

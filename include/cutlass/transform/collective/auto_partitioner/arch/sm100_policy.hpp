@@ -7,15 +7,17 @@
 #include <cute/atom/copy_traits_sm80.hpp>
 #include <cute/atom/mma_atom.hpp>
 #include <cute/atom/mma_traits_sm100.hpp>
+#include <cute/atom/mma_traits_sm120.hpp>
 #include <cute/layout.hpp>
 #include <cute/tensor.hpp>
 #include <cutlass/arch/arch.h>
 #include <cutlass/arch/mma.h>
-#include <cutlass/gemm/collective/builders/sm100_common.inl>
-#include <cutlass/gemm/collective/builders/sm100_simt_builder.inl>
-#include <cutlass/gemm/collective/builders/sm90_common.inl>
 #include <cutlass/gemm/collective/collective_builder_decl.hpp>
 #include <cutlass/gemm/collective/collective_mma_decl.hpp>
+#include <cutlass/gemm/collective/builders/sm100_common.inl>
+#include <cutlass/gemm/collective/builders/sm100_simt_builder.inl>
+#include <cutlass/gemm/collective/builders/sm120_common.inl>
+#include <cutlass/gemm/collective/builders/sm90_common.inl>
 #include <cutlass/gemm/gemm.h>
 #include <cutlass/numeric_types.h>
 #include <type_traits>
@@ -40,6 +42,14 @@ struct IsSm100TensorOpElement
                              std::is_same<Element, float>::value || std::is_same<Element, cutlass::half_t>::value
                                  || std::is_same<Element, cutlass::bfloat16_t>::value
                                  || std::is_same<Element, int8_t>::value || std::is_same<Element, uint8_t>::value>
+{
+};
+
+template <class Element>
+struct IsSm120TensorOpElement
+    : std::integral_constant<bool,
+                             std::is_same<Element, cutlass::float_e4m3_t>::value
+                                 || std::is_same<Element, cutlass::float_e5m2_t>::value>
 {
 };
 
@@ -342,6 +352,103 @@ template <class Element, class GmemStride, class TileShape_MNK, int ThreadCount>
     using SharedToGlobalCopy   = SmemToGmemCopy;
 };
 
+template <class Element, class GmemStride, class TileShape_MNK, int ThreadCount, bool IsRoleA>
+struct Sm120TensorOpMainloopRole
+{
+    // SM120 consumer Blackwell 当前公开的是 F8/F6/F4 MMA，而不是 SM100 的
+    // TCGEN05/TMEM 半精度 UMMA。FP8 的 MMA 指令使用 uint8_t 原始寄存器载荷；
+    // 因此 shared layout 用 uint8_t 分配类型，但模板路由仍以用户输入
+    // Element(float_e4m3_t/float_e5m2_t) 为准。
+    static_assert(IsSm120TensorOpElement<Element>::value, "SM120 TensorOp example path currently targets FP8 inputs.");
+
+    using ElementMma       = decltype(cutlass::gemm::collective::detail::
+                                          sm1xx_kernel_input_element_to_mma_input_element<Element>());
+    using SmemAllocElement = uint8_t;
+
+    static constexpr int BlkMN = IsRoleA ? cute::size<0>(TileShape_MNK{}) : cute::size<1>(TileShape_MNK{});
+    static constexpr int BlkK  = cute::size<2>(TileShape_MNK{});
+
+    using SmemLayoutAtom =
+        decltype(cutlass::gemm::collective::detail::sm120_rr_smem_selector<SmemAllocElement, cute::Int<BlkK>>());
+    using SmemLayout = decltype(cute::tile_to_shape(SmemLayoutAtom{}, cute::Shape<cute::Int<BlkMN>, cute::Int<BlkK>>{}));
+
+    using GmemToSmemCopy     = cute::AutoCopyAsync;
+    using GlobalToSharedCopy = GmemToSmemCopy;
+
+    using SmemToRegCopyOperation = cute::conditional_t<
+        IsRoleA,
+        decltype(cutlass::gemm::collective::detail::sm120_rr_smem_copy_selector_A<Element, Element, true>()),
+        decltype(cutlass::gemm::collective::detail::sm120_rr_smem_copy_selector_B<Element, Element, true>())>;
+    using SmemToRegCopy        = cute::Copy_Atom<SmemToRegCopyOperation, SmemAllocElement>;
+    using SharedToRegisterCopy = SmemToRegCopy;
+
+    using RegToSmemCopy        = cute::Copy_Atom<cute::AutoVectorizingCopyWithAssumedAlignment<128>, SmemAllocElement>;
+    using RegisterToSharedCopy = RegToSmemCopy;
+    using SmemToGmemCopy       = cute::AutoCopyAsync;
+    using SharedToGlobalCopy   = SmemToGmemCopy;
+
+    using SmemElement = SmemAllocElement;
+};
+
+template <class Element, class GmemStride, class TileShape_MNK, int ThreadCount>
+struct Sm120TensorOpRoleA : Sm120TensorOpMainloopRole<Element, GmemStride, TileShape_MNK, ThreadCount, true>
+{
+};
+
+template <class Element, class GmemStride, class TileShape_MNK, int ThreadCount>
+struct Sm120TensorOpRoleB : Sm120TensorOpMainloopRole<Element, GmemStride, TileShape_MNK, ThreadCount, false>
+{
+};
+
+template <class Element, class GmemStride, class TileShape_MNK, int ThreadCount> struct Sm120TensorOpRoleC
+{
+    // RoleC 生成 SM120 FP8 Tensor Core 的 TiledMma 和 FP32 epilogue shared
+    // 布局。这里仍然只生成图纸：没有 stage 计算，没有 shared 分配，也没有
+    // tile 坐标切分。
+    static_assert(IsSm120TensorOpElement<Element>::value, "SM120 TensorOp path currently targets FP8 inputs.");
+
+    using Accumulator     = float;
+    using EpilogueElement = Accumulator;
+
+    using PermTileM = decltype(cute::min(cute::size<0>(TileShape_MNK{}), cute::_128{}));
+    using PermTileN = decltype(cute::min(cute::size<1>(TileShape_MNK{}), cute::_32{}));
+    using MmaAtom    = cute::MMA_Atom<decltype(cute::rr_op_selector_sm120<Element, Element, Accumulator>())>;
+    using AtomLayout = cute::Layout<cute::Shape<cute::_4, cute::_2, cute::_1>>;
+    using TiledMma   = decltype(cute::make_tiled_mma(MmaAtom{}, AtomLayout{}, cute::Tile<PermTileM, PermTileN, cute::_32>{}));
+
+    static constexpr int  BlkM      = cute::size<0>(TileShape_MNK{});
+    static constexpr int  BlkN      = cute::size<1>(TileShape_MNK{});
+    static constexpr bool IsMnMajor = cutlass::gemm::detail::is_mn_major<GmemStride>();
+    static constexpr int  Padding   = SmemPaddingElements<EpilogueElement>::value;
+
+    using SmemLayoutAtom = cute::conditional_t<
+        IsMnMajor,
+        cute::Layout<cute::Shape<cute::Int<BlkM>, cute::Int<BlkN>>, cute::Stride<cute::_1, cute::Int<BlkM + Padding>>>,
+        cute::Layout<cute::Shape<cute::Int<BlkM>, cute::Int<BlkN>>, cute::Stride<cute::Int<BlkN + Padding>, cute::_1>>>;
+    using SmemLayout = SmemLayoutAtom;
+
+    static constexpr int ContiguousDimLength = IsMnMajor ? BlkM : BlkN;
+    static constexpr int AlignmentElements   = Sm100GmemVectorAlignment<EpilogueElement, ContiguousDimLength>::value;
+
+    using GmemToSmemCopy          = cute::AutoCopyAsync;
+    using SmemToRegCopyOperation  = cute::AutoVectorizingCopyWithAssumedAlignment<128>;
+    using RegToSmemCopyOperation  = cute::AutoVectorizingCopyWithAssumedAlignment<128>;
+    using SmemToRegCopy           = cute::Copy_Atom<SmemToRegCopyOperation, EpilogueElement>;
+    using RegToSmemCopy           = cute::Copy_Atom<RegToSmemCopyOperation, EpilogueElement>;
+    using SmemToGmemCopy       = decltype(cutlass::gemm::collective::detail::make_simt_gmem_tiled_copy<
+                                    VectorizedCopyAtom<EpilogueElement, AlignmentElements>,
+                                    ThreadCount,
+                                    AlignmentElements,
+                                    GmemStride,
+                                    cute::Int<BlkM>,
+                                    cute::Int<BlkN>>());
+
+    using GlobalToSharedCopy   = GmemToSmemCopy;
+    using SharedToRegisterCopy = SmemToRegCopy;
+    using RegisterToSharedCopy = RegToSmemCopy;
+    using SharedToGlobalCopy   = SmemToGmemCopy;
+};
+
 } // namespace detail
 
 // ------------------------------ SFINAE 外部偏特化：SM100 ------------------------------
@@ -387,9 +494,11 @@ struct AutoPartitioner<cutlass::arch::Sm120,
                        ThreadCount,
                        std::enable_if_t<detail::IsSm100SimtElement<Element>::value>>
 {
-    using RoleA = detail::Sm100SimtRoleA<Element, GmemStride, TileShape_MNK, ThreadCount>;
-    using RoleB = detail::Sm100SimtRoleB<Element, GmemStride, TileShape_MNK, ThreadCount>;
-    using RoleC = detail::Sm100SimtRoleC<Element, GmemStride, TileShape_MNK, ThreadCount>;
+    // sm_120 当前未启用 SM100 f32x2 SIMT PTX 宏，因此实际可执行示例走
+    // UniversalFMA SIMT 图纸；SM100 原生 policy 仍保留在 ArchTag=Sm100。
+    using RoleA = detail::Sm80SimtRoleA<Element, GmemStride, TileShape_MNK, ThreadCount>;
+    using RoleB = detail::Sm80SimtRoleB<Element, GmemStride, TileShape_MNK, ThreadCount>;
+    using RoleC = detail::Sm80SimtRoleC<Element, GmemStride, TileShape_MNK, ThreadCount>;
 };
 
 template <typename Element, typename GmemStride, typename TileShape_MNK, int ThreadCount>
@@ -404,6 +513,20 @@ struct AutoPartitioner<cutlass::arch::Sm120,
     using RoleA = detail::Sm100TensorOpRoleA<Element, GmemStride, TileShape_MNK, ThreadCount>;
     using RoleB = detail::Sm100TensorOpRoleB<Element, GmemStride, TileShape_MNK, ThreadCount>;
     using RoleC = detail::Sm100TensorOpRoleC<Element, GmemStride, TileShape_MNK, ThreadCount>;
+};
+
+template <typename Element, typename GmemStride, typename TileShape_MNK, int ThreadCount>
+struct AutoPartitioner<cutlass::arch::Sm120,
+                       cutlass::arch::OpClassTensorOp,
+                       Element,
+                       GmemStride,
+                       TileShape_MNK,
+                       ThreadCount,
+                       std::enable_if_t<detail::IsSm120TensorOpElement<Element>::value>>
+{
+    using RoleA = detail::Sm120TensorOpRoleA<Element, GmemStride, TileShape_MNK, ThreadCount>;
+    using RoleB = detail::Sm120TensorOpRoleB<Element, GmemStride, TileShape_MNK, ThreadCount>;
+    using RoleC = detail::Sm120TensorOpRoleC<Element, GmemStride, TileShape_MNK, ThreadCount>;
 };
 
 } // namespace autopartition

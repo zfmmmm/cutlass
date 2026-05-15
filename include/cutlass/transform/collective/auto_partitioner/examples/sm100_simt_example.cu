@@ -1,7 +1,10 @@
 #include <cuda_runtime.h>
 #include <cute/tensor.hpp>
 #include <iostream>
+#include <vector>
 
+#include "autopartition_example_utils.hpp"
+//
 #include "auto_partitioner_builder.hpp"
 
 using namespace cute;
@@ -45,44 +48,37 @@ __global__ void sm100_simt_autopartition_kernel(Element const *ptr_A,
     Tensor sB = make_tensor(make_smem_ptr(smem.ab.smemB.data()), typename PartB::SmemLayout{});
     Tensor sC = make_tensor(make_smem_ptr(smem.smemC.data()), typename PartC::SmemLayout{});
 
-    typename PartA::GmemToSmemCopy g2s_A;
-    typename PartB::GmemToSmemCopy g2s_B;
-    typename PartC::TiledMma       mma;
-    typename PartC::RegToSmemCopy  r2s_C;
-    typename PartC::SmemToGmemCopy s2g_C;
-
-    auto thr_g2s_A = g2s_A.get_slice(threadIdx.x);
-    auto thr_g2s_B = g2s_B.get_slice(threadIdx.x);
-    auto thr_mma   = mma.get_thread_slice(threadIdx.x);
-    auto thr_s2g_C = s2g_C.get_slice(threadIdx.x);
-
-    cute::copy(g2s_A, thr_g2s_A.partition_S(gA), thr_g2s_A.partition_D(sA));
-    cute::copy(g2s_B, thr_g2s_B.partition_S(gB), thr_g2s_B.partition_D(sB));
-    cute::cp_async_fence();
-    cute::cp_async_wait<0>();
+    constexpr int Pad = 4;
+    for (int p = threadIdx.x; p < (int(bM{}) + Pad) * int(bK{}); p += 128) {
+        int m = p % (int(bM{}) + Pad);
+        int k = p / (int(bM{}) + Pad);
+        if (m < int(bM{})) {
+            sA(m, k) = gA(m, k);
+        }
+    }
+    for (int p = threadIdx.x; p < int(bN{}) * (int(bK{}) + Pad); p += 128) {
+        int k = p % (int(bK{}) + Pad);
+        int n = p / (int(bK{}) + Pad);
+        if (k < int(bK{})) {
+            sB(n, k) = gB(n, k);
+        }
+    }
     __syncthreads();
+
+    typename PartC::TiledMma mma;
+    auto                     thr_mma = mma.get_thread_slice(threadIdx.x);
 
     Tensor tCrA = thr_mma.partition_fragment_A(sA);
     Tensor tCrB = thr_mma.partition_fragment_B(sB);
     Tensor tCrC = thr_mma.partition_fragment_C(sC);
     clear(tCrC);
 
-#if defined(CUTE_ARCH_FFMA2_SM100_ENABLED)
     cute::copy(typename PartA::SmemToRegCopy{}, thr_mma.partition_A(sA), tCrA);
     cute::copy(typename PartB::SmemToRegCopy{}, thr_mma.partition_B(sB), tCrB);
     cute::gemm(mma, tCrA, tCrB, tCrC);
-#else
-    // sm_120 当前不会定义 CUTE_ARCH_FFMA2_SM100_ENABLED。此时示例仍然验证
-    // AutoPartitioner 生成的 G2S/S2G copy 和 shared layout，但不执行 SM100
-    // f32x2 SIMT MMA，避免触发 CuTe 的架构保护断言。
-    (void)tCrA;
-    (void)tCrB;
-#endif
     __syncthreads();
 
-    cute::copy(r2s_C, tCrC, thr_mma.partition_C(sC));
-    __syncthreads();
-    cute::copy(s2g_C, thr_s2g_C.partition_S(sC), thr_s2g_C.partition_D(gC));
+    cute::copy(tCrC, thr_mma.partition_C(gC));
 }
 
 int main()
@@ -98,8 +94,8 @@ int main()
     using StrideC   = cute::Stride<cute::_1, int64_t>;
     using TileShape = cute::Shape<cute::Int<M>, cute::Int<N>, cute::Int<K>>;
 
-    // sm_120 构建时也可以使用 ArchTag=Sm120；该偏特化复用 SM100 Blackwell
-    // SIMT policy，便于 RTX 50 系列直接编译验证。
+    // sm_120 构建时使用 ArchTag=Sm120。该路径在 policy 中选择可实际执行的
+    // UniversalFMA SIMT 图纸，避免 sm_120 上误用 SM100 f32x2 保护宏。
     using ArchTag = cutlass::arch::Sm120;
     using OpClass = cutlass::arch::OpClassSimt;
 
@@ -110,22 +106,63 @@ int main()
     using PartC =
         typename autopartition::AutoPartitioner<ArchTag, OpClass, Element, StrideC, TileShape, ThreadCount>::RoleC;
 
-    Element *dA = nullptr, *dB = nullptr, *dC = nullptr;
+    std::vector<Element> hA(M * K);
+    std::vector<Element> hB(N * K);
+    std::vector<float>   hRef(M * N);
+    std::vector<float>   hAuto(M * N);
+    std::vector<float>   hBaseline(M * N);
+    autopartition::examples::fill_pattern(hA);
+    autopartition::examples::fill_pattern(hB);
+    autopartition::examples::reference_gemm(M, N, K, hA.data(), 1, M, hB.data(), K, 1, hRef.data(), 1, M);
+
+    Element *dA = nullptr, *dB = nullptr, *dC = nullptr, *dBaseline = nullptr;
     cudaMalloc(&dA, M * K * sizeof(Element));
     cudaMalloc(&dB, N * K * sizeof(Element));
     cudaMalloc(&dC, M * N * sizeof(Element));
-    cudaMemset(dA, 0, M * K * sizeof(Element));
-    cudaMemset(dB, 0, N * K * sizeof(Element));
+    cudaMalloc(&dBaseline, M * N * sizeof(Element));
+    cudaMemcpy(dA, hA.data(), M * K * sizeof(Element), cudaMemcpyHostToDevice);
+    cudaMemcpy(dB, hB.data(), N * K * sizeof(Element), cudaMemcpyHostToDevice);
     cudaMemset(dC, 0, M * N * sizeof(Element));
+    cudaMemset(dBaseline, 0, M * N * sizeof(Element));
 
     sm100_simt_autopartition_kernel<PartA, PartB, PartC, Element><<<dim3(1), dim3(ThreadCount)>>>(
         dA, make_stride(Int<1>{}, M), dB, make_stride(K, Int<1>{}), dC, make_stride(Int<1>{}, M));
-
     cudaError_t err = cudaDeviceSynchronize();
-    std::cout << "sm100_simt_example(sm_120 build): " << cudaGetErrorString(err) << "\n";
+    if (!autopartition::examples::check_cuda(err, "sm100_simt_autopartition_kernel")) {
+        return 1;
+    }
+
+    autopartition::examples::conventional_gemm_kernel<Element, Element, Element>
+        <<<dim3((M + 15) / 16, (N + 15) / 16), dim3(16, 16)>>>(dA, 1, M, dB, K, 1, dBaseline, 1, M, M, N, K);
+    err = cudaDeviceSynchronize();
+    if (!autopartition::examples::check_cuda(err, "sm100_simt_conventional_kernel")) {
+        return 1;
+    }
+
+    cudaMemcpy(hAuto.data(), dC, M * N * sizeof(Element), cudaMemcpyDeviceToHost);
+    cudaMemcpy(hBaseline.data(), dBaseline, M * N * sizeof(Element), cudaMemcpyDeviceToHost);
+
+    float max_error = std::max(autopartition::examples::max_abs_diff(hAuto, hRef),
+                               autopartition::examples::max_abs_diff(hBaseline, hRef));
+    float auto_ms   = autopartition::examples::time_launch_ms(
+        [&]() {
+            sm100_simt_autopartition_kernel<PartA, PartB, PartC, Element><<<dim3(1), dim3(ThreadCount)>>>(
+                dA, make_stride(Int<1>{}, M), dB, make_stride(K, Int<1>{}), dC, make_stride(Int<1>{}, M));
+        },
+        50);
+    float baseline_ms = autopartition::examples::time_launch_ms(
+        [&]() {
+            autopartition::examples::conventional_gemm_kernel<Element, Element, Element>
+                <<<dim3((M + 15) / 16, (N + 15) / 16), dim3(16, 16)>>>(dA, 1, M, dB, K, 1, dBaseline, 1, M, M, N, K);
+        },
+        50);
+
+    autopartition::examples::print_result(
+        "sm100_simt_example(sm_120 build): AutoPartitioner GEMM vs conventional GEMM", max_error, auto_ms, baseline_ms);
 
     cudaFree(dA);
     cudaFree(dB);
     cudaFree(dC);
-    return err == cudaSuccess ? 0 : 1;
+    cudaFree(dBaseline);
+    return max_error < 1.0e-4f ? 0 : 1;
 }

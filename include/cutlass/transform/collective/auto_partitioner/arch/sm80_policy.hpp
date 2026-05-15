@@ -1,116 +1,172 @@
-#pragma once
+#pragma once // 确保头文件在一次编译中只被包含一次，防止重定义错误
 
-#include <cstdint>
-#include <cute/atom/copy_atom.hpp>
-#include <cute/atom/copy_traits_sm75.hpp>
-#include <cute/atom/copy_traits_sm80.hpp>
-#include <cute/atom/mma_atom.hpp>
-#include <cute/atom/mma_traits_sm80.hpp>
-#include <cute/layout.hpp>
-#include <cute/tensor.hpp>
-#include <cutlass/arch/arch.h>
-#include <cutlass/arch/mma.h>
-#include <cutlass/gemm/collective/builders/sm90_common.inl>
-#include <cutlass/gemm/gemm.h>
-#include <cutlass/numeric_types.h>
-#include <type_traits>
+// ------------------------------------------------------------------
+// 包含必要的标准库和 CUTE/CUTLASS 核心头文件
+// ------------------------------------------------------------------
+#include <cstdint>     // 提供固定宽度的整数类型，如 int8_t, uint8_t, int32_t 等
+#include <type_traits> // 提供编译期类型信息和类型变换（如 std::is_same, std::enable_if_t）
 
-#include "../auto_partitioner.hpp"
+// CUTE 头文件：CUTE 是一个基于代数拓扑概念的 C++ 模板库，专门用于描述和操作高维 Layout 和 Tensor
+#include <cute/arch/copy.hpp>      // 提供对底层 PTX 内存拷贝指令（如 ld.global, st.shared）的封装
+#include <cute/atom/copy_atom.hpp> // 定义 Copy_Atom，将基础的拷贝指令与特定数据类型绑定
+#include <cute/atom/copy_traits_sm75.hpp> // 包含 SM75 引入的指令特征（如 ldmatrix 用于 Tensor Core）
+#include <cute/atom/copy_traits_sm80.hpp> // 包含 SM80 引入的指令特征（如 cp.async 异步拷贝）
+#include <cute/atom/mma_atom.hpp>         // 定义 MMA_Atom，将矩阵乘累加指令（MMA）封装为 CUTE 原语
+#include <cute/atom/mma_traits_sm80.hpp>  // 包含 SM80 Tensor Core mma.sync 指令集的特征定义
+#include <cute/layout.hpp> // CUTE 的核心：Layout = Shape o Stride，描述逻辑坐标到物理索引的映射
+#include <cute/tensor.hpp> // 提供对 CUTE Tensor 的支持，Tensor 是 Layout 和物理指针/引擎的结合
+
+// CUTLASS 头文件：提供架构标签和枚举类型
+#include <cutlass/arch/arch.h> // 提供 SM 架构的 Tag 标签（如 cutlass::arch::Sm80）
+#include <cutlass/arch/mma.h>  // 提供操作类别的 Tag 标签（如 OpClassSimt, OpClassTensorOp）
+#include <cutlass/gemm/collective/builders/sm90_common.inl> // 借用 SM90 builder 中的一些通用辅助函数（如 is_mn_major）
+#include <cutlass/gemm/gemm.h>                              // CUTLASS GEMM 的核心定义
+#include <cutlass/numeric_types.h> // 提供特定精度的数值类型（如 half_t, bfloat16_t, tfloat32_t）
+
+#include "../auto_partitioner.hpp" // 引入项目上游定义的基础泛型模板 AutoPartitioner
 
 namespace autopartition {
 namespace detail {
 
-// ------------------------------ 类型路由 ------------------------------
-// SIMT 路径使用线程级 FMA，因此覆盖常见标量类型；TensorOp 路径只开放
-// SM80 mma.sync / ldmatrix 能稳定覆盖的类型。新增类型时只需要扩展这些
-// trait 和下面的 TensorOpTraits，不需要改 AutoPartitioner 主模板。
+// ==================================================================
+// 1. 类型路由特征 (Type Routing Traits)
+// ==================================================================
+// 目的：在编译期通过 SFINAE (Substitution Failure Is Not An Error) 机制，
+// 决定当前数据类型（Element）是否可以使用 SIMT（CUDA 核心）或 TensorOp（Tensor 核心）。
+
+// 判断输入类型是否受 SM80 SIMT (FMA指令) 支持。SIMT 使用传统的标量/向量计算单元。
 template <class Element>
 struct IsSm80SimtElement
-    : std::integral_constant<bool,
-                             std::is_same<Element, float>::value || std::is_same<Element, double>::value
-                                 || std::is_same<Element, cutlass::half_t>::value
-                                 || std::is_same<Element, cutlass::bfloat16_t>::value>
+    : std::integral_constant<bool,                                       // 继承自标准库的编译期布尔常量
+                             std::is_same<Element, float>::value ||      // 单精度浮点 (FP32)
+                                 std::is_same<Element, double>::value || // 双精度浮点 (FP64)
+                                 std::is_same<Element, cutlass::half_t>::value ||   // 半精度浮点 (FP16)
+                                 std::is_same<Element, cutlass::bfloat16_t>::value> // 脑浮点 (BF16)
 {
 };
 
+// 判断输入类型是否受 SM80 TensorOp 支持。TensorOp 依赖特定的硬件矩阵乘引擎（MMA指令）。
 template <class Element>
 struct IsSm80TensorOpElement
     : std::integral_constant<bool,
-                             std::is_same<Element, float>::value || std::is_same<Element, cutlass::tfloat32_t>::value
-                                 || std::is_same<Element, cutlass::half_t>::value
-                                 || std::is_same<Element, cutlass::bfloat16_t>::value
-                                 || std::is_same<Element, int8_t>::value || std::is_same<Element, uint8_t>::value>
+                             std::is_same<Element, float>::value || // FP32（底层可能会转为 TF32 执行）
+                                 std::is_same<Element, cutlass::tfloat32_t>::value || // TensorFloat-32 (TF32)
+                                 std::is_same<Element, cutlass::half_t>::value ||     // FP16
+                                 std::is_same<Element, cutlass::bfloat16_t>::value || // BF16
+                                 std::is_same<Element, int8_t>::value || // 8位有符号整数（常用于量化推理）
+                                 std::is_same<Element, uint8_t>::value> // 8位无符号整数
 {
 };
 
+// ==================================================================
+// 2. 线程排布映射 (Thread Layout Policies)
+// ==================================================================
+// 目的：决定一个 CTA (Cooperative Thread Array, 即 Thread Block) 内部的线程
+// 如何在逻辑 M 和 N 维度上进行二维映射。这直接影响访存合并和数据复用。
+
+// SIMT 模式的线程布局策略
 template <int TileM, int TileN, int ThreadCount> struct OptimalSimtThreadLayout
 {
-    // SIMT 的线程布局只决定每个 CTA 内线程如何铺到 M/N 方向。这里不推导
-    // pipeline stage，也不假设 A/B 两个 operand 的形状关系。
+    // 强制限制线程数只能是 64, 128, 256。这是为了对齐常用的 Block 设定（2~8个 Warp）。
     static_assert(ThreadCount == 64 || ThreadCount == 128 || ThreadCount == 256,
                   "SM80 SIMT supports 64, 128, or 256 CTA threads.");
+
+    // 启发式分配 M 维度的线程数 (TM)。
+    // 如果总线程是 256（8个 Warp），且当前处理的 M 边长大于 N 边长，则给 M 分配 32 个线程，否则给 M 分配 16 个线程。
+    // 如果总线程不是 256，则 M 维度固定分配 16 个线程。
+    /// TODO:需要考虑到512和1024线程的特殊情况，当前的启发式分配逻辑无法覆盖到这两种情况
     static constexpr int TM = (ThreadCount == 256) ? ((TileM > TileN) ? 32 : 16) : 16;
+
+    // N 维度的线程数由总线程数除以 M 维度线程数得出。
     static constexpr int TN = ThreadCount / TM;
+
+    // 确保线程数可以整除，保证生成的矩阵块是完整的（没有“半个”线程被分配）。
     static_assert(ThreadCount % TM == 0, "Invalid SM80 SIMT thread layout.");
+
+    // cute::Layout 接受 Shape 作为参数。这里的 Shape 是 <TM, TN, 1>。
+    // cute::Int<> 将运行期常量转为编译期类型常量，实现零运行时开销。
     using Layout = cute::Layout<cute::Shape<cute::Int<TM>, cute::Int<TN>, cute::_1>>;
 };
 
+// TensorOp 模式的线程布局策略。TensorOp 是以 Warp (32 线程) 为基本单位调度 MMA 指令的。
 template <int TileM, int TileN, int ThreadCount> struct OptimalTensorOpThreadLayout
 {
-    // TensorOp 按 warp 数铺开。WarpM/WarpN 是“局部最优”的静态选择，
-    // 让较长维度拿到更多 warp，同时保持只依赖 TileShape 和 ThreadCount。
+    // TensorOp 操作要求线程数必须是 Warp 大小的整数倍。
     static_assert(ThreadCount % 32 == 0, "SM80 TensorOp requires whole warps.");
-    static constexpr int WarpCount = ThreadCount / 32;
+    static constexpr int WarpCount = ThreadCount / 32; // 计算总 Warp 数量
+
+    // 限制 Warp 数量只能是 1, 2, 4, 8，这是为了适配后续 TiledMMA 分布式的物理限制。
+    /// TODO:需要考虑到16和32个Warp的特殊情况，当前的启发式分配逻辑无法覆盖到这两种情况
     static_assert(WarpCount == 1 || WarpCount == 2 || WarpCount == 4 || WarpCount == 8,
                   "SM80 TensorOp supports 1, 2, 4, or 8 warps.");
 
+    // 启发式 Warp 分配逻辑：将更多的 Warp 铺垫在较长的维度上。
+    // 这样做的核心目的是“最大化 Shared Memory 的数据重用率”。
     static constexpr int WarpM = (WarpCount == 8) ? ((TileM >= TileN) ? 4 : 2)
                                : (WarpCount == 4) ? ((TileM >= TileN) ? 2 : 1)
                                : (WarpCount == 2) ? ((TileM >= TileN) ? 2 : 1)
                                                   : 1;
-    static constexpr int WarpN = WarpCount / WarpM;
+    static constexpr int WarpN = WarpCount / WarpM; // 剩余的 Warp 铺到 N 维
 
+    // 生成二维 Warp 排布 Layout。
     using Layout = cute::Layout<cute::Shape<cute::Int<WarpM>, cute::Int<WarpN>, cute::_1>>;
 };
 
-template <class Element, int ContiguousElements> struct GmemVectorAlignment
-{
-    // cp.async 最喜欢 16B 对齐；当 tile 连续维度不满足 16B 向量化时，
-    // 逐级退到 8B/4B。这个值只描述单个张量的全局内存访问粒度。
-    static constexpr int ElementBytes = int(sizeof(Element));
-    static constexpr int Align16      = (ElementBytes <= 16 && (16 % ElementBytes) == 0) ? (16 / ElementBytes) : 0;
-    static constexpr int Align8       = (ElementBytes <= 8 && (8 % ElementBytes) == 0) ? (8 / ElementBytes) : 0;
-    static constexpr int Align4       = (ElementBytes <= 4 && (4 % ElementBytes) == 0) ? (4 / ElementBytes) : 0;
+// ==================================================================
+// 3. 内存对齐与访存向量化 (Memory Alignment & Vectorization)
+// ==================================================================
 
+// 动态推导 Global Memory（显存）访问的最优向量化粒度（16B, 8B, 4B）。
+template <class Element, int ContiguousElements> // ContiguousElements 指在内存中最内层连续的元素数量
+struct GmemVectorAlignment
+{
+    static constexpr int ElementBytes = int(sizeof(Element)); // 单个元素占据的字节数
+
+    // 计算满足 16B/8B/4B 对齐分别需要多少个元素。
+    // SM80 架构下单线程单次内存事务最高效的宽度是 128-bit (16 Bytes)，常用于 cp.async 指令。
+    static constexpr int Align16 = (ElementBytes <= 16 && (16 % ElementBytes) == 0) ? (16 / ElementBytes) : 0;
+    static constexpr int Align8  = (ElementBytes <= 8 && (8 % ElementBytes) == 0) ? (8 / ElementBytes) : 0;
+    static constexpr int Align4  = (ElementBytes <= 4 && (4 % ElementBytes) == 0) ? (4 / ElementBytes) : 0;
+
+    // 贪心策略：优先选择能被连续元素个数整除的最大对齐宽度。
     static constexpr int value = (Align16 != 0 && (ContiguousElements % Align16) == 0) ? Align16
                                : (Align8 != 0 && (ContiguousElements % Align8) == 0)   ? Align8
                                : (Align4 != 0 && (ContiguousElements % Align4) == 0)   ? Align4
                                                                                        : 0;
 
+    // 防御性断言：如果找不到合法的向量化宽度（通常说明参数配置极其恶劣或不对齐），在编译期熔断。
     static_assert(value != 0, "No legal cp.async vector width for this element type and contiguous tile extent.");
 };
 
+// 计算 Shared Memory（共享内存）为了防止 Bank Conflict 需要的 Padding 数量。
 template <class Element> struct SmemPaddingElements
 {
-    // SIMT shared load 的主要风险是固定 stride 打到同一组 bank。
-    // 对 SIMT 来说，简单 padding 比引入 swizzle 更稳：地址仍保持单调，
-    // gmem->smem 的 tiled copy 也更容易保持向量化。TensorOp/UMMA 需要
-    // ldmatrix/descriptor 的 canonical swizzle，则在专门路径里处理。
+    // Shared memory 由 32 个 Bank 组成，每个 Bank 位宽 4 Bytes (共128 Bytes)。
+    // 如果元素的行长刚好是 32 的倍数，不同行同列的元素会落在同一个 Bank，导致严重的访问串行化（Bank Conflict）。
+    // 此处策略：强行在连续维度的末尾补足 (16 Bytes / 元素大小) 个占位元素，使得下一行的起始地址错开。
+    /// TODO:默认为16byte的padding策略可能过于激进，考虑根据实际访问模式和元素大小进行更细粒度的调整
     static constexpr int value = (sizeof(Element) < 16) ? (16 / int(sizeof(Element))) : 1;
 };
 
+// 工具类型：使用 AutoVectorizingCopyWithAssumedAlignment 生成通用的全局向量化 Copy Atom。
 template <class Element, int AlignmentElements>
 using VectorizedCopyAtom =
     cute::Copy_Atom<cute::AutoVectorizingCopyWithAssumedAlignment<AlignmentElements *int(sizeof(Element)) * 8>,
                     Element>;
 
+// ==================================================================
+// 4. SIMT (CUDA Core) 模式的架构定义
+// ==================================================================
+
+// 为 SIMT 提取 A 和 B 矩阵在主循环（Mainloop）中的公共访存和布局特征。
 template <class Element, class GmemStride, int TileMN, int TileK, int ThreadCount> struct Sm80SimtMainloopRole
 {
-    // RoleA/RoleB 的共同 SIMT 主循环图纸。TileMN 对 A 表示 M，对 B 表示 N。
-    // GmemStride 决定 MN-major 或 K-major，从而决定 shared layout 的 padding 方向。
+    // 判断 Global Memory 传进来的 Stride 是按 M/N 连续（Col/Row-Major）还是 K 连续。
     static constexpr bool IsMnMajor = cutlass::gemm::detail::is_mn_major<GmemStride>();
     static constexpr int  Padding   = SmemPaddingElements<Element>::value;
 
+    // 静态构建 Shared Memory 内部的 Layout。
+    // 如果是 MnMajor，对列维（Stride 的第二维）施加 Padding；反之对行维施加 Padding。
     using SmemLayoutAtom = cute::conditional_t<IsMnMajor,
                                                cute::Layout<cute::Shape<cute::Int<TileMN>, cute::Int<TileK>>,
                                                             cute::Stride<cute::_1, cute::Int<TileMN + Padding>>>,
@@ -118,26 +174,45 @@ template <class Element, class GmemStride, int TileMN, int TileK, int ThreadCoun
                                                             cute::Stride<cute::Int<TileK + Padding>, cute::_1>>>;
     using SmemLayout     = SmemLayoutAtom;
 
+    // 确定物理内存中连续存放的那一维的长度。
     static constexpr int ContiguousDimLength = IsMnMajor ? TileMN : TileK;
-    static constexpr int AlignmentElements   = GmemVectorAlignment<Element, ContiguousDimLength>::value;
-    using AlignmentType                      = cute::uint_byte_t<AlignmentElements *int(sizeof(Element))>;
 
-    using GmemCopyAtom   = cute::Copy_Atom<cute::SM80_CP_ASYNC_CACHEALWAYS_ZFILL<AlignmentType>, Element>;
-    using GmemToSmemCopy = decltype(cutlass::gemm::collective::detail::make_simt_gmem_tiled_copy<GmemCopyAtom,
-                                                                                                 ThreadCount,
-                                                                                                 AlignmentElements,
-                                                                                                 GmemStride,
-                                                                                                 cute::Int<TileMN>,
-                                                                                                 cute::Int<TileK>>());
+    // 全局写回 (STG) 使用的对齐宽度。
+    static constexpr int VectorAlignmentElements = GmemVectorAlignment<Element, ContiguousDimLength>::value;
 
-    // SIMT 的寄存器搬运保持 DefaultCopy，让 CUTE 根据 partition 后的 tensor
-    // 选择 LDS/STS 形态；全局写回则显式使用向量化 copy，便于生成 STG.E.128。
-    using SmemToRegCopy  = cute::Copy_Atom<cute::DefaultCopy, Element>;
-    using RegToSmemCopy  = cute::Copy_Atom<cute::DefaultCopy, Element>;
+    // Gmem 到 Smem 的对齐。在 SIMT 简单模式下退化为 1，意味着依赖编译器自己去推断 cp.async 或 ld.global
+    // 的宽度，不够极致。
+    /// TODO:
+    static constexpr int GmemToSmemAlignmentElements = 1;
+    using AlignmentType = cute::uint_byte_t<GmemToSmemAlignmentElements *int(sizeof(Element))>;
+
+    // 构建 Gmem 到 Smem 的 Copy_Atom。此处采用 SM80 独有的 CP.ASYNC 硬件指令。
+    // CACHEALWAYS 表示数据在全局内存经过 L2 时缓存；ZFILL 用于越界访问时自动填零。
+    using GmemCopyAtom = cute::Copy_Atom<cute::SM80_CP_ASYNC_CACHEALWAYS_ZFILL<AlignmentType>, Element>;
+
+    // 实例化一个 TiledCopy，负责调度所有线程协作完成 TileMN x TileK 数据的异步搬运。
+    /// TODO:???
+    using TiledGmemToSmemCopy =
+        decltype(cutlass::gemm::collective::detail::make_simt_gmem_tiled_copy<GmemCopyAtom,
+                                                                              ThreadCount,
+                                                                              GmemToSmemAlignmentElements,
+                                                                              GmemStride,
+                                                                              cute::Int<TileMN>,
+                                                                              cute::Int<TileK>>());
+    /// TODO:???
+    using AsyncGmemToSmemCopy = cute::AutoCopyAsync; // 定义为异步拷贝模式
+    using GmemToSmemCopy      = cute::DefaultCopy;   // 对外暴露的接口暂定为默认退化形态
+
+    // Shared -> Register 的数据加载策略。DefaultCopy 使得 CUTE 编译器自己选择 LDS 指令。
+    using SmemToRegCopy = cute::Copy_Atom<cute::DefaultCopy, Element>;
+    // Register -> Shared 的回写策略（用于 Epilogue 等场景）。
+    using RegToSmemCopy = cute::Copy_Atom<cute::DefaultCopy, Element>;
+    // 最终结果 Shared -> Global 写回策略，显式声明了前面推导出的最大向量化配置 VectorAlignmentElements。
+    /// TODO:???
     using SmemToGmemCopy = decltype(cutlass::gemm::collective::detail::make_simt_gmem_tiled_copy<
-                                    VectorizedCopyAtom<Element, AlignmentElements>,
+                                    VectorizedCopyAtom<Element, VectorAlignmentElements>,
                                     ThreadCount,
-                                    AlignmentElements,
+                                    VectorAlignmentElements,
                                     GmemStride,
                                     cute::Int<TileMN>,
                                     cute::Int<TileK>>());
@@ -148,6 +223,7 @@ template <class Element, class GmemStride, int TileMN, int TileK, int ThreadCoun
     using SharedToGlobalCopy   = SmemToGmemCopy;
 };
 
+// A 矩阵特化（M 维度参与推导）
 template <class Element, class GmemStride, class TileShape_MNK, int ThreadCount>
 struct Sm80SimtRoleA
     : Sm80SimtMainloopRole<Element,
@@ -158,6 +234,7 @@ struct Sm80SimtRoleA
 {
 };
 
+// B 矩阵特化（N 维度参与推导）
 template <class Element, class GmemStride, class TileShape_MNK, int ThreadCount>
 struct Sm80SimtRoleB
     : Sm80SimtMainloopRole<Element,
@@ -168,192 +245,21 @@ struct Sm80SimtRoleB
 {
 };
 
+// C 矩阵 / Accumulator 在 SIMT 模式下的定义。
 template <class Element, class GmemStride, class TileShape_MNK, int ThreadCount> struct Sm80SimtRoleC
 {
     static constexpr int BlkM = cute::size<0>(TileShape_MNK{});
     static constexpr int BlkN = cute::size<1>(TileShape_MNK{});
 
+    // 采用此前定义的 SIMT 最优线程排布
     using ThreadLayout = typename OptimalSimtThreadLayout<BlkM, BlkN, ThreadCount>::Layout;
-    using MmaAtom      = cute::MMA_Atom<cute::UniversalFMA<Element, Element, Element>>;
-    using TiledMma     = decltype(cute::make_tiled_mma(MmaAtom{}, ThreadLayout{}));
 
-    static constexpr bool IsMnMajor = cutlass::gemm::detail::is_mn_major<GmemStride>();
-    static constexpr int  Padding   = SmemPaddingElements<Element>::value;
+    // 定义核心计算 Atom：UniversalFMA 代表通用的 Fused Multiply-Add (a * b + c) 指令。
+    using MmaAtom = cute::MMA_Atom<cute::UniversalFMA<Element, Element, Element>>;
+    // 根据 ThreadLayout 将 MmaAtom 扩展为块级别的 TiledMma。
+    using TiledMma = decltype(cute::make_tiled_mma(MmaAtom{}, ThreadLayout{}));
 
-    using SmemLayoutAtom = cute::conditional_t<
-        IsMnMajor,
-        cute::Layout<cute::Shape<cute::Int<BlkM>, cute::Int<BlkN>>, cute::Stride<cute::_1, cute::Int<BlkM + Padding>>>,
-        cute::Layout<cute::Shape<cute::Int<BlkM>, cute::Int<BlkN>>, cute::Stride<cute::Int<BlkN + Padding>, cute::_1>>>;
-    using SmemLayout = SmemLayoutAtom;
-
-    static constexpr int ContiguousDimLength = IsMnMajor ? BlkM : BlkN;
-    static constexpr int AlignmentElements   = GmemVectorAlignment<Element, ContiguousDimLength>::value;
-    using AlignmentType                      = cute::uint_byte_t<AlignmentElements *int(sizeof(Element))>;
-
-    using GmemToSmemCopy = decltype(cutlass::gemm::collective::detail::make_simt_gmem_tiled_copy<
-                                    cute::Copy_Atom<cute::SM80_CP_ASYNC_CACHEALWAYS_ZFILL<AlignmentType>, Element>,
-                                    ThreadCount,
-                                    AlignmentElements,
-                                    GmemStride,
-                                    cute::Int<BlkM>,
-                                    cute::Int<BlkN>>());
-    using RegToSmemCopy  = cute::Copy_Atom<cute::DefaultCopy, Element>;
-    using SmemToRegCopy  = cute::Copy_Atom<cute::DefaultCopy, Element>;
-    using SmemToGmemCopy = decltype(cutlass::gemm::collective::detail::make_simt_gmem_tiled_copy<
-                                    VectorizedCopyAtom<Element, AlignmentElements>,
-                                    ThreadCount,
-                                    AlignmentElements,
-                                    GmemStride,
-                                    cute::Int<BlkM>,
-                                    cute::Int<BlkN>>());
-
-    using GlobalToSharedCopy   = GmemToSmemCopy;
-    using SharedToRegisterCopy = SmemToRegCopy;
-    using RegisterToSharedCopy = RegToSmemCopy;
-    using SharedToGlobalCopy   = SmemToGmemCopy;
-};
-
-template <class Element> struct Sm80TensorOpTraits;
-
-// ------------------------------ SM80 TensorOp atom 表 ------------------------------
-// 每个数据类型绑定一个 SM80 mma.sync atom、累加类型以及推荐 shared->register
-// copy atom。RoleA/RoleB/RoleC 只引用 trait，不在偏特化里写类型分支。
-template <> struct Sm80TensorOpTraits<cutlass::half_t>
-{
-    using MmaOperation = cute::SM80_16x8x16_F32F16F16F32_TN;
-    using Accumulator  = float;
-    using SmemCopyAtom = cute::Copy_Atom<cute::SM75_U32x4_LDSM_N, cutlass::half_t>;
-};
-
-template <> struct Sm80TensorOpTraits<cutlass::bfloat16_t>
-{
-    using MmaOperation = cute::SM80_16x8x16_F32BF16BF16F32_TN;
-    using Accumulator  = float;
-    using SmemCopyAtom = cute::Copy_Atom<cute::SM75_U32x4_LDSM_N, cutlass::bfloat16_t>;
-};
-
-template <> struct Sm80TensorOpTraits<cutlass::tfloat32_t>
-{
-    using MmaOperation = cute::SM80_16x8x8_F32TF32TF32F32_TN;
-    using Accumulator  = float;
-    using SmemCopyAtom = cute::Copy_Atom<cute::AutoVectorizingCopyWithAssumedAlignment<128>, cutlass::tfloat32_t>;
-};
-
-template <> struct Sm80TensorOpTraits<float> : Sm80TensorOpTraits<cutlass::tfloat32_t>
-{
-    using SmemCopyAtom = cute::Copy_Atom<cute::AutoVectorizingCopyWithAssumedAlignment<128>, float>;
-};
-
-template <> struct Sm80TensorOpTraits<int8_t>
-{
-    using MmaOperation = cute::SM80_16x8x32_S32S8S8S32_TN;
-    using Accumulator  = int32_t;
-    using SmemCopyAtom = cute::Copy_Atom<cute::AutoVectorizingCopyWithAssumedAlignment<128>, int8_t>;
-};
-
-template <> struct Sm80TensorOpTraits<uint8_t>
-{
-    using MmaOperation = cute::SM80_16x8x32_S32U8U8S32_TN;
-    using Accumulator  = int32_t;
-    using SmemCopyAtom = cute::Copy_Atom<cute::AutoVectorizingCopyWithAssumedAlignment<128>, uint8_t>;
-};
-
-template <int TileMN, int TileK, bool UseLdMatrix> struct Sm80TensorOpSmemLayoutSelector;
-
-template <int TileMN, int TileK> struct Sm80TensorOpSmemLayoutSelector<TileMN, TileK, true>
-{
-    // half/bfloat16 TensorOp 使用 SM80 经典 128B swizzle 布局，目标是服务
-    // ldmatrix。这个 layout 是“图纸”；真正的 shared memory 分配由下游 kernel 做。
-    using SwizzleAtom =
-        decltype(cute::composition(cute::Swizzle<3, 3, 3>{},
-                                   cute::Layout<cute::Shape<cute::_8, cute::Shape<cute::_8, cute::_8>>,
-                                                cute::Stride<cute::_8, cute::Stride<cute::_1, cute::_64>>>{}));
-    using type = decltype(cute::tile_to_shape(SwizzleAtom{}, cute::Shape<cute::Int<TileMN>, cute::Int<TileK>>{}));
-};
-
-template <int TileMN, int TileK> struct Sm80TensorOpSmemLayoutSelector<TileMN, TileK, false>
-{
-    // TF32 / int8 等当前未走 ldmatrix swizzle 的类型使用 padding layout。
-    // 这样仍然可以通过 cp.async/vectorized copy 跑通全局到 shared 的搬运。
-    using type =
-        cute::Layout<cute::Shape<cute::Int<TileMN>, cute::Int<TileK>>, cute::Stride<cute::_1, cute::Int<TileMN + 4>>>;
-};
-
-template <class Element, class GmemStride, int TileMN, int TileK, int ThreadCount> struct Sm80TensorOpMainloopRole
-{
-    // 是否启用 ldmatrix swizzle 完全由当前单个 operand 的 Element 和 tile 决定，
-    // 不读取另一个 operand 的参数，避免 A/B 推导耦合。
-    static constexpr bool UseLdMatrix =
-        (std::is_same<Element, cutlass::half_t>::value || std::is_same<Element, cutlass::bfloat16_t>::value)
-        && (TileMN % 8 == 0) && (TileK % 64 == 0);
-
-    using SmemLayoutAtom = typename Sm80TensorOpSmemLayoutSelector<TileMN, TileK, UseLdMatrix>::type;
-    using SmemLayout     = SmemLayoutAtom;
-
-    static constexpr bool IsMnMajor           = cutlass::gemm::detail::is_mn_major<GmemStride>();
-    static constexpr int  ContiguousDimLength = IsMnMajor ? TileMN : TileK;
-    static constexpr int  AlignmentElements   = GmemVectorAlignment<Element, ContiguousDimLength>::value;
-    using AlignmentType                       = cute::uint_byte_t<AlignmentElements *int(sizeof(Element))>;
-
-    using GmemCopyAtom   = cute::Copy_Atom<cute::SM80_CP_ASYNC_CACHEALWAYS_ZFILL<AlignmentType>, Element>;
-    using GmemToSmemCopy = decltype(cutlass::gemm::collective::detail::make_simt_gmem_tiled_copy<GmemCopyAtom,
-                                                                                                 ThreadCount,
-                                                                                                 AlignmentElements,
-                                                                                                 GmemStride,
-                                                                                                 cute::Int<TileMN>,
-                                                                                                 cute::Int<TileK>>());
-
-    // SmemToRegCopy 暴露 ldmatrix/向量化 copy atom。对于 swizzled layout，
-    // 某些完整 kernel 会选择 cute::cooperative_copy 或自定义 TiledCopy 先填充 shared；
-    // AutoPartitioner 只提供 atom 与 layout，不负责组织 pipeline。
-    using SmemToRegCopy  = typename Sm80TensorOpTraits<Element>::SmemCopyAtom;
-    using RegToSmemCopy  = cute::Copy_Atom<cute::AutoVectorizingCopyWithAssumedAlignment<128>, Element>;
-    using SmemToGmemCopy = decltype(cutlass::gemm::collective::detail::make_simt_gmem_tiled_copy<
-                                    VectorizedCopyAtom<Element, AlignmentElements>,
-                                    ThreadCount,
-                                    AlignmentElements,
-                                    GmemStride,
-                                    cute::Int<TileMN>,
-                                    cute::Int<TileK>>());
-
-    using GlobalToSharedCopy   = GmemToSmemCopy;
-    using SharedToRegisterCopy = SmemToRegCopy;
-    using RegisterToSharedCopy = RegToSmemCopy;
-    using SharedToGlobalCopy   = SmemToGmemCopy;
-};
-
-template <class Element, class GmemStride, class TileShape_MNK, int ThreadCount>
-struct Sm80TensorOpRoleA
-    : Sm80TensorOpMainloopRole<Element,
-                               GmemStride,
-                               cute::size<0>(TileShape_MNK{}),
-                               cute::size<2>(TileShape_MNK{}),
-                               ThreadCount>
-{
-};
-
-template <class Element, class GmemStride, class TileShape_MNK, int ThreadCount>
-struct Sm80TensorOpRoleB
-    : Sm80TensorOpMainloopRole<Element,
-                               GmemStride,
-                               cute::size<1>(TileShape_MNK{}),
-                               cute::size<2>(TileShape_MNK{}),
-                               ThreadCount>
-{
-};
-
-template <class Element, class GmemStride, class TileShape_MNK, int ThreadCount> struct Sm80TensorOpRoleC
-{
-    // RoleC 负责给 epilogue/accumulator 提供 MMA atom、C shared layout 与写回 copy。
-    // 对 half/bfloat16，Accumulator 是 float；输出是否 cast 回 Element 由下游 epilogue 决定。
-    static constexpr int BlkM = cute::size<0>(TileShape_MNK{});
-    static constexpr int BlkN = cute::size<1>(TileShape_MNK{});
-
-    using ThreadLayout = typename OptimalTensorOpThreadLayout<BlkM, BlkN, ThreadCount>::Layout;
-    using MmaAtom      = cute::MMA_Atom<typename Sm80TensorOpTraits<Element>::MmaOperation>;
-    using TiledMma     = decltype(cute::make_tiled_mma(MmaAtom{}, ThreadLayout{}));
-    using Accumulator  = typename Sm80TensorOpTraits<Element>::Accumulator;
-
+    // C 矩阵 Layout 推导过程同 A/B
     static constexpr bool IsMnMajor = cutlass::gemm::detail::is_mn_major<GmemStride>();
     static constexpr int  Padding   = SmemPaddingElements<Element>::value;
     using SmemLayoutAtom            = cute::conditional_t<
@@ -366,6 +272,8 @@ template <class Element, class GmemStride, class TileShape_MNK, int ThreadCount>
     static constexpr int AlignmentElements   = GmemVectorAlignment<Element, ContiguousDimLength>::value;
     using AlignmentType                      = cute::uint_byte_t<AlignmentElements *int(sizeof(Element))>;
 
+    // 与 Mainloop 不同，C 矩阵的 GmemToSmem 这里强制使用了最大 AlignmentElements，
+    // 因为通常 C 的搬运不在极其关键的 inner-loop 中，可以直接开足马力。
     using GmemToSmemCopy = decltype(cutlass::gemm::collective::detail::make_simt_gmem_tiled_copy<
                                     cute::Copy_Atom<cute::SM80_CP_ASYNC_CACHEALWAYS_ZFILL<AlignmentType>, Element>,
                                     ThreadCount,
@@ -373,8 +281,9 @@ template <class Element, class GmemStride, class TileShape_MNK, int ThreadCount>
                                     GmemStride,
                                     cute::Int<BlkM>,
                                     cute::Int<BlkN>>());
-    using SmemToRegCopy  = cute::Copy_Atom<cute::AutoVectorizingCopyWithAssumedAlignment<128>, Element>;
+    // 假设 128B 的极端对齐，触发最优化的 LSTS 和 STG。
     using RegToSmemCopy  = cute::Copy_Atom<cute::AutoVectorizingCopyWithAssumedAlignment<128>, Element>;
+    using SmemToRegCopy  = cute::Copy_Atom<cute::AutoVectorizingCopyWithAssumedAlignment<128>, Element>;
     using SmemToGmemCopy = decltype(cutlass::gemm::collective::detail::make_simt_gmem_tiled_copy<
                                     VectorizedCopyAtom<Element, AlignmentElements>,
                                     ThreadCount,
@@ -389,11 +298,302 @@ template <class Element, class GmemStride, class TileShape_MNK, int ThreadCount>
     using SharedToGlobalCopy   = SmemToGmemCopy;
 };
 
+// ==================================================================
+// 5. TensorOp (Tensor Core) 模式的架构定义
+// ==================================================================
+
+// 声明硬件特征映射模板
+template <class Element> struct Sm80TensorOpTraits;
+template <class Element, bool IsRoleA> struct Sm80TensorOpSmemCopyOperation;
+
+// 针对 FP16 数据类型的 TensorOp 硬件原语绑定。
+template <> struct Sm80TensorOpTraits<cutlass::half_t>
+{
+    // CUTE 提供的预封装 MMA 指令：16x8x16 规模。
+    // 计算公式 D = A * B + C。
+    // F32F16F16F32 含义: C(FP32) = A(FP16) * B(FP16) + C(FP32)。混合精度计算，保真度高。
+    // _TN 含义：硬件指令要求输入数据 A 留在寄存器中表现为 Transpose(T，行主序)，B 表现为 Normal(N，列主序)。
+    using MmaOperation = cute::SM80_16x8x16_F32F16F16F32_TN;
+    using Accumulator  = float; // 累加器强制采用 FP32
+};
+
+// 针对 BF16 数据类型（指令规模与半精度一致）
+template <> struct Sm80TensorOpTraits<cutlass::bfloat16_t>
+{
+    using MmaOperation = cute::SM80_16x8x16_F32BF16BF16F32_TN;
+    using Accumulator  = float;
+};
+
+// 针对 TF32 (TensorFloat-32) 数据类型。
+template <> struct Sm80TensorOpTraits<cutlass::tfloat32_t>
+{
+    // 注意 K 维变成了 8（16x8x8），因为 TF32 数据更宽（32 bit）。
+    using MmaOperation = cute::SM80_16x8x8_F32TF32TF32F32_TN;
+    using Accumulator  = float;
+};
+template <> struct Sm80TensorOpTraits<float> : Sm80TensorOpTraits<cutlass::tfloat32_t>
+{
+};
+
+// 针对 INT8 的量化计算。
+template <> struct Sm80TensorOpTraits<int8_t>
+{
+    // INT8 的吞吐量极大，单条指令能算 16x8x32，采用 S32(有符号32位) 进行无损累加。
+    using MmaOperation = cute::SM80_16x8x32_S32S8S8S32_TN;
+    using Accumulator  = int32_t;
+};
+
+template <> struct Sm80TensorOpTraits<uint8_t>
+{
+    using MmaOperation = cute::SM80_16x8x32_S32U8U8S32_TN;
+    using Accumulator  = int32_t;
+};
+
+// ---------------- LDMATRIX 指令派发器 ----------------
+// ldmatrix (Load Matrix) 是 Volta/Turing 引入，Ampere 发扬光大的神级指令。
+// 它可以绕过标准的共享内存访问限制，由一组 Warp 内的线程协作发出一条请求，
+// 就可以直接将大块连续内存(通常16x16矩阵块)灌入这 32 个线程的独立寄存器中，极大节省指令发射带宽。
+
+// A 矩阵 (IsRoleA=true) 的 FP16 操作：
+template <> struct Sm80TensorOpSmemCopyOperation<cutlass::half_t, true>
+{
+    // LDSM_N (Normal)：正常将一整块内存载入。
+    // U32x4：每个线程一次性拿取 4 个 32-bit (即 8 个 FP16 元素)。
+    using type = cute::SM75_U32x4_LDSM_N;
+};
+
+// B 矩阵 (IsRoleA=false) 的 FP16 操作：
+template <> struct Sm80TensorOpSmemCopyOperation<cutlass::half_t, false>
+{
+    // LDSM_T (Transpose)：读取时在硬件层面顺带做矩阵转置。
+    // 为什么要转置？因为上面 MmaOperation 选的是 _TN，说明 B 矩阵要求进入 MMA 单元时是列主序(N)。
+    // 如果 B 数据存放在内存是行主序，通过 LDSM_T 可以在取数据的瞬间翻转成列主序。
+    using type = cute::SM75_U16x8_LDSM_T;
+};
+
+template <> struct Sm80TensorOpSmemCopyOperation<cutlass::bfloat16_t, true>
+{
+    using type = cute::SM75_U32x4_LDSM_N;
+};
+template <> struct Sm80TensorOpSmemCopyOperation<cutlass::bfloat16_t, false>
+{
+    using type = cute::SM75_U16x8_LDSM_T;
+};
+
+// 兜底（Fallback）：如果不是 FP16/BF16 这种支持 16x16 ldmatrix 最佳形态的，退化为普通按对齐推演的拷贝向量操作。
+template <class Element, bool IsRoleA> struct Sm80TensorOpSmemCopyOperation
+{
+    using type = cute::AutoVectorizingCopyWithAssumedAlignment<128>;
+};
+
+
+// ---------------- Swizzle (地址异或置换) Layout 生成器 ----------------
+template <int TileMN, int TileK, bool UseLdMatrix, bool IsRoleA> struct Sm80TensorOpSmemLayoutSelector;
+
+// 当触发 LdMatrix，且为 RoleA 时使用的 Swizzle
+template <int TileMN, int TileK> struct Sm80TensorOpSmemLayoutSelector<TileMN, TileK, true, true>
+{
+    // Swizzle 的核心目的是解决极高带宽访存时的 Shared Memory Bank Conflict。
+    // Swizzle<3, 3, 3> 表示对地址坐标的特定比特位执行异或（XOR）操作。
+    // 第一个 3 (Base): XOR 开始的比特偏移。
+    // 第二个 3 (Shift): XOR 对应坐标的偏移。
+    // 第三个 3 (Mask): 异或涉及的比特位数为 3 位（即 8 种可能组合）。
+    // 在这里配合后面的 Shape<_8, _64>，它实现的是经典的 128 Bytes 颗粒度 Swizzle (16 个 FP16 =
+    // 32B，乘以跨度构成了物理上错位存储）。
+    using SwizzleAtom = decltype(cute::composition(
+        cute::Swizzle<3, 3, 3>{},
+        cute::Layout<cute::Shape<cute::_8, cute::_64>, cute::Stride<cute::_64, cute::_1>>{})); // 行主序核心块
+    // 将 Tile 形状映射到带 Swizzle 特性的物理地址布局中
+    using type = decltype(cute::tile_to_shape(SwizzleAtom{}, cute::Shape<cute::Int<TileMN>, cute::Int<TileK>>{}));
+};
+
+// 当触发 LdMatrix，且为 RoleB 时使用的 Swizzle
+template <int TileMN, int TileK> struct Sm80TensorOpSmemLayoutSelector<TileMN, TileK, true, false>
+{
+    // 对于 B 矩阵，它往往在全局是 K-major（或者是 N-major 需要转置），
+    // 配合后续的 LDSM_T，此处选用的 SwizzleAtom 底层基盘布局是列主序：Shape<_64, _8>, Stride<_1, _64>
+    using SwizzleAtom = decltype(cute::composition(
+        cute::Swizzle<3, 3, 3>{},
+        cute::Layout<cute::Shape<cute::_64, cute::_8>, cute::Stride<cute::_1, cute::_64>>{}));
+    using type = decltype(cute::tile_to_shape(SwizzleAtom{}, cute::Shape<cute::Int<TileMN>, cute::Int<TileK>>{}));
+};
+
+// 如果不使用 LdMatrix（例如类型是 TF32 / Int8），退回到传统的 Padding 方法规避冲突
+template <int TileMN, int TileK, bool IsRoleA> struct Sm80TensorOpSmemLayoutSelector<TileMN, TileK, false, IsRoleA>
+{
+    // TileMN + 4 的 padding，由于不使用极其敏感的 128B Swizzle，普通的错位即可满足 cp.async -> smem 的需要。
+    using type =
+        cute::Layout<cute::Shape<cute::Int<TileMN>, cute::Int<TileK>>, cute::Stride<cute::_1, cute::Int<TileMN + 4>>>;
+};
+
+
+// ---------------- MMA 指令的 Tile 组合器 ----------------
+template <class Element, class MmaAtom, class ThreadLayout> struct Sm80TensorOpTiledMmaSelector
+{
+    // 默认回退：按 CUTE 内置的基础行为排布。
+    using type = decltype(cute::make_tiled_mma(MmaAtom{}, ThreadLayout{}));
+};
+
+template <class MmaAtom, class ThreadLayout> struct Sm80TensorOpTiledMmaSelector<cutlass::half_t, MmaAtom, ThreadLayout>
+{
+    // 针对 FP16 特化：设定 Value Tile 为 32x32x16。
+    // 这代表着整个 ThreadBlock 的 MMA 指令是在逻辑概念上的 32x32x16 矩阵微块层面展开协同计算。
+    // 这个尺寸与之前定义的 128B Swizzle Layout 和 LDSM 四倍载入完美契合。
+    using type = cute::TiledMMA<MmaAtom, ThreadLayout, cute::Tile<cute::_32, cute::_32, cute::_16>>;
+};
+
+template <class MmaAtom, class ThreadLayout>
+struct Sm80TensorOpTiledMmaSelector<cutlass::bfloat16_t, MmaAtom, ThreadLayout>
+{
+    using type = cute::TiledMMA<MmaAtom, ThreadLayout, cute::Tile<cute::_32, cute::_32, cute::_16>>;
+};
+
+
+// ---------------- TensorOp A/B 矩阵通用构建协议 ----------------
+template <class Element, class GmemStride, int TileMN, int TileK, int ThreadCount, bool IsRoleA>
+struct Sm80TensorOpMainloopRole
+{
+    // 判断是否具备开启极致性能 LdMatrix 指令的条件：
+    // 1. 类型必须是 16bit 浮点。
+    // 2. MN 维度的块长必须是 8 的倍数（LDSM_T 最小单元限制）。
+    // 3. K 维度的块长必须是 64 的倍数（为了与 128 Bytes/行 的最佳 Swizzle 适配，64 个 FP16 = 128B）。
+    static constexpr bool UseLdMatrix =
+        (std::is_same<Element, cutlass::half_t>::value || std::is_same<Element, cutlass::bfloat16_t>::value)
+        && (TileMN % 8 == 0) && (TileK % 64 == 0);
+
+    // 基于上述判断抽取当前应当使用的 SmemLayout。
+    using SmemLayoutAtom = typename Sm80TensorOpSmemLayoutSelector<TileMN, TileK, UseLdMatrix, IsRoleA>::type;
+    using SmemLayout     = SmemLayoutAtom;
+
+    static constexpr bool IsMnMajor           = cutlass::gemm::detail::is_mn_major<GmemStride>();
+    static constexpr int  ContiguousDimLength = IsMnMajor ? TileMN : TileK;
+    static constexpr int  AlignmentElements   = GmemVectorAlignment<Element, ContiguousDimLength>::value;
+    using AlignmentType                       = cute::uint_byte_t<AlignmentElements *int(sizeof(Element))>;
+
+    using GmemCopyAtom = cute::Copy_Atom<cute::SM80_CP_ASYNC_CACHEALWAYS_ZFILL<AlignmentType>, Element>;
+    using TiledGmemToSmemCopy =
+        decltype(cutlass::gemm::collective::detail::make_simt_gmem_tiled_copy<GmemCopyAtom,
+                                                                              ThreadCount,
+                                                                              AlignmentElements,
+                                                                              GmemStride,
+                                                                              cute::Int<TileMN>,
+                                                                              cute::Int<TileK>>());
+
+    // 如果开启了 Swizzle (UseLdMatrix为真)，传统的 TiledCopy 的线性映射会与物理 Swizzle 冲突！
+    // 必须退化回声明 AutoCopyAsync，强迫后续的 Kernel 侧使用 cute::cooperative_copy 进行编排重整。
+    using GmemToSmemCopy = cute::conditional_t<UseLdMatrix, cute::AutoCopyAsync, TiledGmemToSmemCopy>;
+
+    // 向寄存器的加载应用专门的 LDSM (ldmatrix) atom
+    using SmemToRegCopyOperation = typename Sm80TensorOpSmemCopyOperation<Element, IsRoleA>::type;
+    using SmemToRegCopy          = cute::Copy_Atom<SmemToRegCopyOperation, Element>;
+    // 寄存器写回暂不做 Swizzle 的逆变换假设，采用默认的 128 位对齐拷贝。
+    using RegToSmemCopyOperation = cute::AutoVectorizingCopyWithAssumedAlignment<128>;
+    using RegToSmemCopy          = cute::Copy_Atom<RegToSmemCopyOperation, Element>;
+    using SmemToGmemCopy         = decltype(cutlass::gemm::collective::detail::make_simt_gmem_tiled_copy<
+                                            VectorizedCopyAtom<Element, AlignmentElements>,
+                                            ThreadCount,
+                                            AlignmentElements,
+                                            GmemStride,
+                                            cute::Int<TileMN>,
+                                            cute::Int<TileK>>());
+
+    using GlobalToSharedCopy   = GmemToSmemCopy;
+    using SharedToRegisterCopy = SmemToRegCopy;
+    using RegisterToSharedCopy = RegToSmemCopy;
+    using SharedToGlobalCopy   = SmemToGmemCopy;
+};
+
+// 特化 RoleA/RoleB
+template <class Element, class GmemStride, class TileShape_MNK, int ThreadCount>
+struct Sm80TensorOpRoleA
+    : Sm80TensorOpMainloopRole<Element,
+                               GmemStride,
+                               cute::size<0>(TileShape_MNK{}),
+                               cute::size<2>(TileShape_MNK{}),
+                               ThreadCount,
+                               true>
+{
+};
+
+template <class Element, class GmemStride, class TileShape_MNK, int ThreadCount>
+struct Sm80TensorOpRoleB
+    : Sm80TensorOpMainloopRole<Element,
+                               GmemStride,
+                               cute::size<1>(TileShape_MNK{}),
+                               cute::size<2>(TileShape_MNK{}),
+                               ThreadCount,
+                               false>
+{
+};
+
+// C矩阵 (输出累加) 特化
+template <class Element, class GmemStride, class TileShape_MNK, int ThreadCount> struct Sm80TensorOpRoleC
+{
+    static constexpr int BlkM = cute::size<0>(TileShape_MNK{});
+    static constexpr int BlkN = cute::size<1>(TileShape_MNK{});
+
+    // C 矩阵基于 Warp 的二维分布排布 (WarpM x WarpN)
+    using ThreadLayout = typename OptimalTensorOpThreadLayout<BlkM, BlkN, ThreadCount>::Layout;
+
+    // 引入前面特化好的 TensorOp 硬件原子操作
+    using MmaAtom = cute::MMA_Atom<typename Sm80TensorOpTraits<Element>::MmaOperation>;
+    // 确定计算过程中的累加类型（如 FP16 计算，累加类型可能是 FP32 避免溢出）
+    using Accumulator = typename Sm80TensorOpTraits<Element>::Accumulator;
+
+    // 将 MmaAtom 和 ThreadLayout 混合构成块级的 TiledMMA
+    using TiledMma        = typename Sm80TensorOpTiledMmaSelector<Element, MmaAtom, ThreadLayout>::type;
+    using EpilogueElement = Accumulator; // Epilogue（尾部处理阶段）处理的依然是宽精度的累加器
+
+    // C 矩阵的共享内存推导：不引入复杂的 Swizzle（因为 C 的写回往往不再参与核心的极限迭代）。
+    // 依然靠加 Padding 防护冲突。
+    static constexpr bool IsMnMajor = cutlass::gemm::detail::is_mn_major<GmemStride>();
+    static constexpr int  Padding   = SmemPaddingElements<EpilogueElement>::value;
+    using SmemLayoutAtom            = cute::conditional_t<
+                   IsMnMajor,
+                   cute::Layout<cute::Shape<cute::Int<BlkM>, cute::Int<BlkN>>, cute::Stride<cute::_1, cute::Int<BlkM + Padding>>>,
+                   cute::Layout<cute::Shape<cute::Int<BlkM>, cute::Int<BlkN>>, cute::Stride<cute::Int<BlkN + Padding>, cute::_1>>>;
+    using SmemLayout = SmemLayoutAtom;
+
+    static constexpr int ContiguousDimLength = IsMnMajor ? BlkM : BlkN;
+    static constexpr int AlignmentElements   = GmemVectorAlignment<EpilogueElement, ContiguousDimLength>::value;
+    using AlignmentType                      = cute::uint_byte_t<AlignmentElements *int(sizeof(EpilogueElement))>;
+
+    // 后处理的各类 Copy 设置，保持最大向量化 128B 对齐。
+    using GmemToSmemCopy =
+        decltype(cutlass::gemm::collective::detail::make_simt_gmem_tiled_copy<
+                 cute::Copy_Atom<cute::SM80_CP_ASYNC_CACHEALWAYS_ZFILL<AlignmentType>, EpilogueElement>,
+                 ThreadCount,
+                 AlignmentElements,
+                 GmemStride,
+                 cute::Int<BlkM>,
+                 cute::Int<BlkN>>());
+    using SmemToRegCopyOperation = cute::AutoVectorizingCopyWithAssumedAlignment<128>;
+    using RegToSmemCopyOperation = cute::AutoVectorizingCopyWithAssumedAlignment<128>;
+    using SmemToRegCopy          = cute::Copy_Atom<SmemToRegCopyOperation, EpilogueElement>;
+    using RegToSmemCopy          = cute::Copy_Atom<RegToSmemCopyOperation, EpilogueElement>;
+    using SmemToGmemCopy         = decltype(cutlass::gemm::collective::detail::make_simt_gmem_tiled_copy<
+                                            VectorizedCopyAtom<EpilogueElement, AlignmentElements>,
+                                            ThreadCount,
+                                            AlignmentElements,
+                                            GmemStride,
+                                            cute::Int<BlkM>,
+                                            cute::Int<BlkN>>());
+
+    using GlobalToSharedCopy   = GmemToSmemCopy;
+    using SharedToRegisterCopy = SmemToRegCopy;
+    using RegisterToSharedCopy = RegToSmemCopy;
+    using SharedToGlobalCopy   = SmemToGmemCopy;
+};
+
 } // namespace detail
 
-// ------------------------------ SFINAE 外部偏特化 ------------------------------
-// 注意这里没有嵌套 dispatcher，也没有在一个大类里写 if constexpr。
-// ArchTag + OpClass + Element 共同决定是否匹配该偏特化；不匹配时回到空壳主模板。
+// ==================================================================
+// 6. SFINAE 外部偏特化装载器 (The Dispatcher)
+// ==================================================================
+// 将上述详细定义好的内部部件，根据编译期的特征（SM版本、Op类别、数据类型有效性）
+// 映射到全局通用接口 AutoPartitioner 上。
+
+// SIMT 分支装载。仅当 OpClass 为 OpClassSimt 且该元素支持 SIMT 时匹配该模板特化。
 template <typename Element, typename GmemStride, typename TileShape_MNK, int ThreadCount>
 struct AutoPartitioner<cutlass::arch::Sm80,
                        cutlass::arch::OpClassSimt,
@@ -408,6 +608,7 @@ struct AutoPartitioner<cutlass::arch::Sm80,
     using RoleC = detail::Sm80SimtRoleC<Element, GmemStride, TileShape_MNK, ThreadCount>;
 };
 
+// TensorOp 分支装载。仅当 OpClass 为 OpClassTensorOp 且该元素支持 TensorOp 时匹配。
 template <typename Element, typename GmemStride, typename TileShape_MNK, int ThreadCount>
 struct AutoPartitioner<cutlass::arch::Sm80,
                        cutlass::arch::OpClassTensorOp,
