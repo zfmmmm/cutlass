@@ -95,11 +95,37 @@ int main()
         typename autopartition::AutoPartitioner<ArchTag, OpClass, InputElement, StrideB, TileShape, ThreadCount>::RoleB;
     using PartC =
         typename autopartition::AutoPartitioner<ArchTag, OpClass, InputElement, StrideC, TileShape, ThreadCount>::RoleC;
+    using PartA_MnMajor = typename autopartition::
+        AutoPartitioner<ArchTag, OpClass, InputElement, cute::Stride<cute::_1, int64_t>, TileShape, ThreadCount>::RoleA;
+    using PartB_KMajor = typename autopartition::
+        AutoPartitioner<ArchTag, OpClass, InputElement, cute::Stride<int64_t, cute::_1>, TileShape, ThreadCount>::RoleB;
+    using SmallFloatTile = cute::Shape<cute::Int<2>, cute::Int<8>, cute::Int<128>>;
+    using PartA_Fallback64 = typename autopartition::
+        AutoPartitioner<ArchTag, OpClass, float, cute::Stride<cute::_1, int64_t>, SmallFloatTile, ThreadCount>::RoleA;
 
     static_assert(std::is_same<typename PartC::Accumulator, OutputElement>::value,
                   "SM80 half TensorOp example stores FP32 accumulators.");
     static_assert(cute::cosize_v<typename PartA::SmemLayout> > 0, "PartA swizzled smem layout must be valid.");
     static_assert(cute::cosize_v<typename PartB::SmemLayout> > 0, "PartB swizzled smem layout must be valid.");
+    static_assert(std::is_same<typename PartA::SmemToRegCopyOperation, cute::SM75_U32x4_LDSM_N>::value,
+                  "K-major A should load with LDSM_N.");
+    static_assert(std::is_same<typename PartA_MnMajor::SmemToRegCopyOperation, cute::SM75_U16x8_LDSM_T>::value,
+                  "MN-major A should keep MN-contiguous shared storage and use LDSM_T.");
+    static_assert(std::is_same<typename PartB::SmemToRegCopyOperation, cute::SM75_U16x8_LDSM_T>::value,
+                  "MN-major B should keep MN-contiguous shared storage and use LDSM_T.");
+    static_assert(std::is_same<typename PartB_KMajor::SmemToRegCopyOperation, cute::SM75_U32x4_LDSM_N>::value,
+                  "K-major B should load with LDSM_N.");
+    static_assert(std::is_same<typename autopartition::detail::
+                                   Sm80TensorOpSmemCopyOperation<InputElement, false, 2, true>::type,
+                               cute::SM75_U32x4_LDSM_N>::value,
+                  "LDSM_N width should not be reduced by a 32-bit gmem alignment.");
+    static_assert(std::is_same<typename autopartition::detail::
+                                   Sm80TensorOpSmemCopyOperation<InputElement, true, 2, true>::type,
+                               cute::SM75_U16x8_LDSM_T>::value,
+                  "LDSM_T width should not be reduced by a 32-bit gmem alignment.");
+    static_assert(std::is_same<typename PartA_Fallback64::SmemToRegCopyOperation,
+                               cute::AutoVectorizingCopyWithAssumedAlignment<64>>::value,
+                  "Non-LDSM fallback should follow the inferred contiguous-dimension alignment.");
 
     std::vector<InputElement>  hA(M * K);
     std::vector<InputElement>  hB(N * K);

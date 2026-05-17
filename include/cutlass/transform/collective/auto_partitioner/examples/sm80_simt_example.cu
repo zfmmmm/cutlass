@@ -1,6 +1,7 @@
 #include <cuda_runtime.h>
 #include <cute/tensor.hpp>
 #include <iostream>
+#include <type_traits>
 #include <vector>
 
 #include "autopartition_example_utils.hpp"
@@ -50,23 +51,15 @@ __global__ void sm80_simt_autopartition_kernel(Element const *ptr_A,
     Tensor sB = make_tensor(make_smem_ptr(smem.ab.smemB.data()), typename PartB::SmemLayout{});
     Tensor sC = make_tensor(make_smem_ptr(smem.smemC.data()), typename PartC::SmemLayout{});
 
-    // Gmem -> Smem: SIMT 示例按 shared 物理地址连续写入，padding 孔位跳过。
-    // 这种线程映射在 Nsight Compute 上没有 shared store/LDGSTS bank conflict。
-    constexpr int Pad = 4;
-    for (int p = threadIdx.x; p < (int(bM{}) + Pad) * int(bK{}); p += 256) {
-        int m = p % (int(bM{}) + Pad);
-        int k = p / (int(bM{}) + Pad);
-        if (m < int(bM{})) {
-            sA(m, k) = gA(m, k);
-        }
-    }
-    for (int p = threadIdx.x; p < int(bN{}) * (int(bK{}) + Pad); p += 256) {
-        int k = p % (int(bK{}) + Pad);
-        int n = p / (int(bK{}) + Pad);
-        if (k < int(bK{})) {
-            sB(n, k) = gB(n, k);
-        }
-    }
+    typename PartA::GmemToSmemCopy copy_A;
+    typename PartB::GmemToSmemCopy copy_B;
+    auto                           thr_copy_A = copy_A.get_slice(threadIdx.x);
+    auto                           thr_copy_B = copy_B.get_slice(threadIdx.x);
+
+    cute::copy(copy_A, thr_copy_A.partition_S(gA), thr_copy_A.partition_D(sA));
+    cute::copy(copy_B, thr_copy_B.partition_S(gB), thr_copy_B.partition_D(sB));
+    cp_async_fence();
+    cp_async_wait<0>();
     __syncthreads();
 
     typename PartC::TiledMma mma;
@@ -114,6 +107,12 @@ int main()
     static_assert(cute::cosize_v<typename PartA::SmemLayout> > 0, "PartA shared layout must be valid.");
     static_assert(cute::cosize_v<typename PartB::SmemLayout> > 0, "PartB shared layout must be valid.");
     static_assert(cute::cosize_v<typename PartC::SmemLayout> > 0, "PartC shared layout must be valid.");
+    static_assert(PartA::GmemToSmemAlignmentElements == 4, "SIMT A should use 16B cp.async alignment for float.");
+    static_assert(PartB::GmemToSmemAlignmentElements == 4, "SIMT B should use 16B cp.async alignment for float.");
+    static_assert(std::is_same<typename PartA::GmemToSmemCopy, typename PartA::TiledGmemToSmemCopy>::value,
+                  "SIMT A should expose the concrete tiled gmem-to-smem copy.");
+    static_assert(std::is_same<typename PartB::GmemToSmemCopy, typename PartB::TiledGmemToSmemCopy>::value,
+                  "SIMT B should expose the concrete tiled gmem-to-smem copy.");
 
     std::vector<Element> hA(M * K);
     std::vector<Element> hB(N * K);
