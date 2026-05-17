@@ -335,8 +335,15 @@ struct Sm80SimtRoleC
 
 // 声明硬件特征映射模板
 template <class Element> struct Sm80TensorOpTraits;
-template <class Element, bool IsMnMajor> struct Sm80TensorOpLdsmCopyOperation;
-template <class Element, bool IsMnMajor, int AlignmentElements, bool UseLdMatrix> struct Sm80TensorOpSmemCopyOperation;
+template <class MmaOperation, bool IsRoleA> struct MmaOperandContiguity;
+template <bool NeedTranspose> struct Sm80TensorOpLdsmCopyOperation;
+template <class Element,
+          class MmaOperation,
+          bool IsRoleA,
+          bool SmemIsMnMajor,
+          int AlignmentElements,
+          bool UseLdMatrix>
+struct Sm80TensorOpSmemCopyOperation;
 
 // 针对 FP16 数据类型的 TensorOp 硬件原语绑定。
 template <> struct Sm80TensorOpTraits<cutlass::half_t>
@@ -383,30 +390,63 @@ template <> struct Sm80TensorOpTraits<uint8_t>
     using Accumulator  = int32_t;
 };
 
+template <bool IsRoleA>
+struct MmaOperandContiguity<cute::SM80_16x8x16_F32F16F16F32_TN, IsRoleA>
+{
+    static constexpr bool RequiresMnMajor = false;
+};
+
+template <bool IsRoleA>
+struct MmaOperandContiguity<cute::SM80_16x8x16_F32BF16BF16F32_TN, IsRoleA>
+{
+    static constexpr bool RequiresMnMajor = false;
+};
+
+template <bool IsRoleA>
+struct MmaOperandContiguity<cute::SM80_16x8x8_F32TF32TF32F32_TN, IsRoleA>
+{
+    static constexpr bool RequiresMnMajor = false;
+};
+
+template <bool IsRoleA>
+struct MmaOperandContiguity<cute::SM80_16x8x32_S32S8S8S32_TN, IsRoleA>
+{
+    static constexpr bool RequiresMnMajor = false;
+};
+
+template <bool IsRoleA>
+struct MmaOperandContiguity<cute::SM80_16x8x32_S32U8U8S32_TN, IsRoleA>
+{
+    static constexpr bool RequiresMnMajor = false;
+};
+
 // ---------------- LDMATRIX 指令派发器 ----------------
 // ldmatrix 只负责把 shared 中已经顺势存好的连续方向搬进寄存器。
 // 当前 32x32x16 TiledMMA 需要固定的 x4 载入；gmem cp.async alignment 只影响 global->shared。
 // K-major shared 与 _TN 寄存器要求一致，用 LDSM_N；MN-major shared 在载入瞬间转置，用 LDSM_T。
-template <class Element> struct Sm80TensorOpLdsmCopyOperation<Element, false>
+template <> struct Sm80TensorOpLdsmCopyOperation<false>
 {
     using type = cute::SM75_U32x4_LDSM_N;
 };
-template <class Element> struct Sm80TensorOpLdsmCopyOperation<Element, true>
+template <> struct Sm80TensorOpLdsmCopyOperation<true>
 {
     using type = cute::SM75_U16x8_LDSM_T;
 };
 
-template <class Element, bool IsMnMajor, int AlignmentElements>
-struct Sm80TensorOpSmemCopyOperation<Element, IsMnMajor, AlignmentElements, true>
+template <class Element, class MmaOperation, bool IsRoleA, bool SmemIsMnMajor, int AlignmentElements>
+struct Sm80TensorOpSmemCopyOperation<Element, MmaOperation, IsRoleA, SmemIsMnMajor, AlignmentElements, true>
 {
-    using type = typename Sm80TensorOpLdsmCopyOperation<Element, IsMnMajor>::type;
+    static constexpr bool MmaRequiresMnMajor = MmaOperandContiguity<MmaOperation, IsRoleA>::RequiresMnMajor;
+    static constexpr bool NeedTranspose      = (SmemIsMnMajor != MmaRequiresMnMajor);
+    using type                               = typename Sm80TensorOpLdsmCopyOperation<NeedTranspose>::type;
 };
 
 // 非 ldmatrix 路径仍按连续维度可承诺的对齐位宽生成普通 vector copy。
-template <class Element, bool IsMnMajor, int AlignmentElements>
-struct Sm80TensorOpSmemCopyOperation<Element, IsMnMajor, AlignmentElements, false>
+template <class Element, class MmaOperation, bool IsRoleA, bool SmemIsMnMajor, int AlignmentElements>
+struct Sm80TensorOpSmemCopyOperation<Element, MmaOperation, IsRoleA, SmemIsMnMajor, AlignmentElements, false>
 {
     static constexpr int AlignmentBits = AlignmentElements * int(sizeof(Element)) * 8;
+    static constexpr bool NeedTranspose = false;
     using type                         = cute::AutoVectorizingCopyWithAssumedAlignment<AlignmentBits>;
 };
 
@@ -499,6 +539,7 @@ struct Sm80TensorOpMainloopRole
     static constexpr bool UseLdMatrix =
         (std::is_same<Element, cutlass::half_t>::value || std::is_same<Element, cutlass::bfloat16_t>::value)
         && (TileMN % 8 == 0) && (TileK % 64 == 0);
+    using MmaOperation = typename Sm80TensorOpTraits<Element>::MmaOperation;
 
     // 基于上述判断抽取当前应当使用的 SmemLayout。
     using SmemLayoutAtom =
@@ -521,8 +562,10 @@ struct Sm80TensorOpMainloopRole
     using GmemToSmemCopy = cute::conditional_t<UseLdMatrix, cute::AutoCopyAsync, TiledGmemToSmemCopy>;
 
     // 向寄存器的加载应用专门的 LDSM (ldmatrix) atom
-    using SmemToRegCopyOperation =
-        typename Sm80TensorOpSmemCopyOperation<Element, IsMnMajor, AlignmentElements, UseLdMatrix>::type;
+    using SmemCopySelector =
+        Sm80TensorOpSmemCopyOperation<Element, MmaOperation, IsRoleA, IsMnMajor, AlignmentElements, UseLdMatrix>;
+    static constexpr bool SmemToRegNeedTranspose = SmemCopySelector::NeedTranspose;
+    using SmemToRegCopyOperation                 = typename SmemCopySelector::type;
     using SmemToRegCopy = cute::Copy_Atom<SmemToRegCopyOperation, Element>;
     // 寄存器写回同样只承诺当前连续维度推导出的对齐位宽。
     using RegToSmemCopyOperation = cute::AutoVectorizingCopyWithAssumedAlignment<AlignmentBits>;

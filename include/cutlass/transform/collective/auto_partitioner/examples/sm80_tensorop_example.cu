@@ -102,6 +102,7 @@ int main()
     using SmallFloatTile = cute::Shape<cute::Int<2>, cute::Int<8>, cute::Int<128>>;
     using PartA_Fallback64 = typename autopartition::
         AutoPartitioner<ArchTag, OpClass, float, cute::Stride<cute::_1, int64_t>, SmallFloatTile, ThreadCount>::RoleA;
+    using HalfMmaOperation = typename autopartition::detail::Sm80TensorOpTraits<InputElement>::MmaOperation;
 
     static_assert(std::is_same<typename PartC::Accumulator, OutputElement>::value,
                   "SM80 half TensorOp example stores FP32 accumulators.");
@@ -116,11 +117,21 @@ int main()
     static_assert(std::is_same<typename PartB_KMajor::SmemToRegCopyOperation, cute::SM75_U32x4_LDSM_N>::value,
                   "K-major B should load with LDSM_N.");
     static_assert(std::is_same<typename autopartition::detail::
-                                   Sm80TensorOpSmemCopyOperation<InputElement, false, 2, true>::type,
+                                   Sm80TensorOpSmemCopyOperation<InputElement,
+                                                                 HalfMmaOperation,
+                                                                 true,
+                                                                 false,
+                                                                 2,
+                                                                 true>::type,
                                cute::SM75_U32x4_LDSM_N>::value,
                   "LDSM_N width should not be reduced by a 32-bit gmem alignment.");
     static_assert(std::is_same<typename autopartition::detail::
-                                   Sm80TensorOpSmemCopyOperation<InputElement, true, 2, true>::type,
+                                   Sm80TensorOpSmemCopyOperation<InputElement,
+                                                                 HalfMmaOperation,
+                                                                 true,
+                                                                 true,
+                                                                 2,
+                                                                 true>::type,
                                cute::SM75_U16x8_LDSM_T>::value,
                   "LDSM_T width should not be reduced by a 32-bit gmem alignment.");
     static_assert(std::is_same<typename PartA_Fallback64::SmemToRegCopyOperation,

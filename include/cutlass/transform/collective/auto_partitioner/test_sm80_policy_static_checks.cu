@@ -95,6 +95,30 @@ static_assert(SimtPartA16::GmemToSmemAlignmentBytes == 16, "16-byte physical ali
 static_assert(SimtPartA4::GmemToSmemAlignmentBytes == 4, "4-byte physical alignment should force 4-byte cp.async.");
 static_assert(SimtPartA4::GmemToSmemAlignmentElements == 1, "float 4-byte copy uses one element.");
 
+using PartA_KMajor = LegacyPartA;
+using PartA_MnMajor = typename autopartition::AutoPartitioner<ArchTag,
+                                                              OpClass,
+                                                              Element,
+                                                              cute::Stride<cute::_1, int64_t>,
+                                                              TileShape64,
+                                                              ThreadCount>::RoleA;
+using PartB_MnMajor = LegacyPartB;
+using PartB_KMajor = typename autopartition::AutoPartitioner<ArchTag,
+                                                             OpClass,
+                                                             Element,
+                                                             cute::Stride<int64_t, cute::_1>,
+                                                             TileShape64,
+                                                             ThreadCount>::RoleB;
+
+static_assert(!PartA_KMajor::SmemToRegNeedTranspose, "K-major A should not transpose for current TN MMA.");
+static_assert(PartA_MnMajor::SmemToRegNeedTranspose, "MN-major A should transpose for current TN MMA.");
+static_assert(PartB_MnMajor::SmemToRegNeedTranspose, "MN-major B should transpose for current TN MMA.");
+static_assert(!PartB_KMajor::SmemToRegNeedTranspose, "K-major B should not transpose for current TN MMA.");
+static_assert(std::is_same<typename PartA_KMajor::SmemToRegCopyOperation, cute::SM75_U32x4_LDSM_N>::value,
+              "No-transpose ldmatrix should use LDSM_N x4.");
+static_assert(std::is_same<typename PartB_MnMajor::SmemToRegCopyOperation, cute::SM75_U16x8_LDSM_T>::value,
+              "Transpose ldmatrix should use LDSM_T x4.");
+
 } // namespace
 
 int main() { return 0; }
