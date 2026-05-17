@@ -648,11 +648,15 @@ struct Sm80TensorOpRoleC
     // 引入前面特化好的 TensorOp 硬件原子操作
     using MmaAtom = cute::MMA_Atom<typename Sm80TensorOpTraits<Element>::MmaOperation>;
     // 确定计算过程中的累加类型（如 FP16 计算，累加类型可能是 FP32 避免溢出）
-    using Accumulator = typename Sm80TensorOpTraits<Element>::Accumulator;
+    using ElementInput   = Element;
+    using ElementCompute = typename Sm80TensorOpTraits<Element>::Accumulator;
+    using ElementOutput  = ElementC;
+    using Accumulator    = ElementCompute;
+    using EpilogueElement = ElementCompute;
+    using OutputElement   = ElementOutput;
 
     // 将 MmaAtom 和 ThreadLayout 混合构成块级的 TiledMMA
-    using TiledMma        = typename Sm80TensorOpTiledMmaSelector<Element, MmaAtom, ThreadLayout>::type;
-    using EpilogueElement = Accumulator; // Epilogue（尾部处理阶段）处理的依然是宽精度的累加器
+    using TiledMma = typename Sm80TensorOpTiledMmaSelector<Element, MmaAtom, ThreadLayout>::type;
 
     // C 矩阵的共享内存推导：不引入复杂的 Swizzle（因为 C 的写回往往不再参与核心的极限迭代）。
     // 依然靠加 Padding 防护冲突。
@@ -665,34 +669,43 @@ struct Sm80TensorOpRoleC
     using SmemLayout = SmemLayoutAtom;
 
     static constexpr int ContiguousDimLength = IsMnMajor ? BlkM : BlkN;
-    static constexpr int AlignmentElements =
-        GmemVectorAlignment<EpilogueElement, ContiguousDimLength, GmemAlignmentBytes>::value;
-    static constexpr int AlignmentBytes =
-        GmemVectorAlignment<EpilogueElement, ContiguousDimLength, GmemAlignmentBytes>::bytes;
-    static constexpr int AlignmentBits = AlignmentBytes * 8;
-    static constexpr int GmemToSmemAlignmentBytes = AlignmentBytes;
-    using AlignmentType                      = cute::uint_byte_t<AlignmentElements *int(sizeof(EpilogueElement))>;
+    static constexpr int EpilogueAlignmentElements =
+        GmemVectorAlignment<EpilogueElement, ContiguousDimLength, 16>::value;
+    static constexpr int EpilogueAlignmentBits =
+        EpilogueAlignmentElements * int(sizeof(EpilogueElement)) * 8;
+    static constexpr int AlignmentElements = EpilogueAlignmentElements;
+    static constexpr int AlignmentBits     = EpilogueAlignmentBits;
 
     // 后处理的各类 Copy 设置，按 C 的连续维度推导实际可承诺的向量宽度。
-    using GmemToSmemCopy =
-        decltype(cutlass::gemm::collective::detail::make_simt_gmem_tiled_copy<
-                 cute::Copy_Atom<cute::SM80_CP_ASYNC_CACHEALWAYS_ZFILL<AlignmentType>, EpilogueElement>,
-                 ThreadCount,
-                 AlignmentElements,
-                 GmemStride,
-                 cute::Int<BlkM>,
-                 cute::Int<BlkN>>());
-    using SmemToRegCopyOperation = cute::AutoVectorizingCopyWithAssumedAlignment<AlignmentBits>;
-    using RegToSmemCopyOperation = cute::AutoVectorizingCopyWithAssumedAlignment<AlignmentBits>;
+    using SmemToRegCopyOperation = cute::AutoVectorizingCopyWithAssumedAlignment<EpilogueAlignmentBits>;
+    using RegToSmemCopyOperation = cute::AutoVectorizingCopyWithAssumedAlignment<EpilogueAlignmentBits>;
     using SmemToRegCopy          = cute::Copy_Atom<SmemToRegCopyOperation, EpilogueElement>;
     using RegToSmemCopy          = cute::Copy_Atom<RegToSmemCopyOperation, EpilogueElement>;
-    using SmemToGmemCopy         = decltype(cutlass::gemm::collective::detail::make_simt_gmem_tiled_copy<
-                                            VectorizedCopyAtom<EpilogueElement, AlignmentElements>,
-                                            ThreadCount,
-                                            AlignmentElements,
-                                            GmemStride,
-                                            cute::Int<BlkM>,
-                                            cute::Int<BlkN>>());
+
+    static constexpr int OutputAlignmentElements =
+        GmemVectorAlignment<ElementOutput, ContiguousDimLength, GmemAlignmentBytes>::value;
+    static constexpr int OutputAlignmentBytes =
+        GmemVectorAlignment<ElementOutput, ContiguousDimLength, GmemAlignmentBytes>::bytes;
+    static constexpr int OutputAlignmentBits = OutputAlignmentBytes * 8;
+    static constexpr int GmemToSmemAlignmentBytes = OutputAlignmentBytes;
+    using OutputAlignmentType = cute::uint_byte_t<OutputAlignmentBytes>;
+
+    using GmemToSmemCopy = decltype(cutlass::gemm::collective::detail::make_simt_gmem_tiled_copy<
+                                    cute::Copy_Atom<cute::SM80_CP_ASYNC_CACHEALWAYS_ZFILL<OutputAlignmentType>,
+                                                    ElementOutput>,
+                                    ThreadCount,
+                                    OutputAlignmentElements,
+                                    GmemStride,
+                                    cute::Int<BlkM>,
+                                    cute::Int<BlkN>>());
+    using OutputSmemToGmemCopy = decltype(cutlass::gemm::collective::detail::make_simt_gmem_tiled_copy<
+                                          VectorizedCopyAtom<ElementOutput, OutputAlignmentElements>,
+                                          ThreadCount,
+                                          OutputAlignmentElements,
+                                          GmemStride,
+                                          cute::Int<BlkM>,
+                                          cute::Int<BlkN>>());
+    using SmemToGmemCopy = OutputSmemToGmemCopy;
 
     using GlobalToSharedCopy   = GmemToSmemCopy;
     using SharedToRegisterCopy = SmemToRegCopy;

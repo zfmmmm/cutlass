@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cuda_runtime.h>
+#include <cute/tensor.hpp>
+#include <cutlass/numeric_conversion.h>
 
 #include <algorithm>
 #include <cmath>
@@ -43,6 +45,18 @@ template <class Element> void fill_pattern(std::vector<Element> &data)
 {
     for (int i = 0; i < int(data.size()); ++i) {
         data[i] = from_float<Element>(patterned_value(i));
+    }
+}
+
+template <class DstTensor, class SrcTensor>
+__device__ void convert_tensor(DstTensor &&dst, SrcTensor const &src)
+{
+    using Dst = typename cute::remove_cvref_t<DstTensor>::value_type;
+    using Src = typename cute::remove_cvref_t<SrcTensor>::value_type;
+    cutlass::NumericConverter<Dst, Src> convert;
+    CUTE_UNROLL
+    for (int i = 0; i < cute::size(dst); ++i) {
+        dst(i) = convert(src(i));
     }
 }
 

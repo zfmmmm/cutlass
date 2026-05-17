@@ -62,6 +62,15 @@ static_assert(cute::cosize_v<typename LegacyPartC::SmemLayout> > 0, "Legacy Role
 static_assert(cute::cosize_v<typename ExtendedPartA::SmemLayout> > 0, "Extended RoleA must instantiate.");
 static_assert(cute::cosize_v<typename ExtendedPartB::SmemLayout> > 0, "Extended RoleB must instantiate.");
 static_assert(cute::cosize_v<typename ExtendedPartC::SmemLayout> > 0, "Extended RoleC must instantiate.");
+static_assert(std::is_same<typename ExtendedPartC::ElementInput, cutlass::half_t>::value,
+              "RoleC should expose input element type.");
+static_assert(std::is_same<typename ExtendedPartC::ElementCompute, float>::value,
+              "RoleC should expose FP32 compute for FP16 TensorOp.");
+static_assert(std::is_same<typename ExtendedPartC::ElementOutput, cutlass::half_t>::value,
+              "RoleC should expose FP16 global output type.");
+static_assert(std::is_same<typename ExtendedPartC::Accumulator, float>::value,
+              "Accumulator remains compute type.");
+static_assert(ExtendedPartC::OutputAlignmentBytes == 4, "RoleC should use explicit C alignment.");
 
 using SimtArch = cutlass::arch::Sm80;
 using SimtOpClass = cutlass::arch::OpClassSimt;

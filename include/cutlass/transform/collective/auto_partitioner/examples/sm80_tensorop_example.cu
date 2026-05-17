@@ -70,7 +70,7 @@ __global__ void sm80_tensorop_autopartition_kernel(InputElement const *ptr_A,
                      identity{},
                      typename PartA::SmemToRegCopyOperation{},
                      typename PartB::SmemToRegCopyOperation{});
-    cute::copy(tCrC, tCgC);
+    autopartition::examples::convert_tensor(tCgC, tCrC);
 }
 
 int main()
@@ -93,8 +93,8 @@ int main()
         typename autopartition::AutoPartitioner<ArchTag, OpClass, InputElement, StrideA, TileShape, ThreadCount>::RoleA;
     using PartB =
         typename autopartition::AutoPartitioner<ArchTag, OpClass, InputElement, StrideB, TileShape, ThreadCount>::RoleB;
-    using PartC =
-        typename autopartition::AutoPartitioner<ArchTag, OpClass, InputElement, StrideC, TileShape, ThreadCount>::RoleC;
+    using PartC = typename autopartition::
+        AutoPartitioner<ArchTag, OpClass, InputElement, StrideC, TileShape, ThreadCount, OutputElement>::RoleC;
     using PartA_MnMajor = typename autopartition::
         AutoPartitioner<ArchTag, OpClass, InputElement, cute::Stride<cute::_1, int64_t>, TileShape, ThreadCount>::RoleA;
     using PartB_KMajor = typename autopartition::
@@ -104,8 +104,10 @@ int main()
         AutoPartitioner<ArchTag, OpClass, float, cute::Stride<cute::_1, int64_t>, SmallFloatTile, ThreadCount>::RoleA;
     using HalfMmaOperation = typename autopartition::detail::Sm80TensorOpTraits<InputElement>::MmaOperation;
 
-    static_assert(std::is_same<typename PartC::Accumulator, OutputElement>::value,
-                  "SM80 half TensorOp example stores FP32 accumulators.");
+    static_assert(std::is_same<typename PartC::ElementCompute, OutputElement>::value,
+                  "SM80 half TensorOp example computes FP32 accumulators.");
+    static_assert(std::is_same<typename PartC::ElementOutput, OutputElement>::value,
+                  "RoleC output element follows the requested output type.");
     static_assert(cute::cosize_v<typename PartA::SmemLayout> > 0, "PartA swizzled smem layout must be valid.");
     static_assert(cute::cosize_v<typename PartB::SmemLayout> > 0, "PartB swizzled smem layout must be valid.");
     static_assert(std::is_same<typename PartA::SmemToRegCopyOperation, cute::SM75_U32x4_LDSM_N>::value,
