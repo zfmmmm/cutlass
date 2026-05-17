@@ -48,8 +48,8 @@ __global__ void sm80_tensorop_autopartition_kernel(InputElement const *ptr_A,
 
     // swizzled shared layout 使用 cooperative_copy + AutoCopyAsync 填充，避免把
     // gmem->smem 的连续向量化假设硬塞进 swizzle 地址空间。
-    cooperative_copy<128, 128>(threadIdx.x, gA, sA, typename PartA::GmemToSmemCopy{});
-    cooperative_copy<128, 128>(threadIdx.x, gB, sB, typename PartB::GmemToSmemCopy{});
+    cooperative_copy<128, PartA::GmemToSmemAlignmentBytes * 8>(threadIdx.x, gA, sA, typename PartA::GmemToSmemCopy{});
+    cooperative_copy<128, PartB::GmemToSmemAlignmentBytes * 8>(threadIdx.x, gB, sB, typename PartB::GmemToSmemCopy{});
     cp_async_fence();
     cp_async_wait<0>();
 

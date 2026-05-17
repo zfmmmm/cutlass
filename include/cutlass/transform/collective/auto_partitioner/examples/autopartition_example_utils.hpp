@@ -96,6 +96,24 @@ inline float max_abs_diff(std::vector<float> const &lhs, std::vector<float> cons
     return diff;
 }
 
+template <class LhsElement, class RhsElement>
+float max_abs_diff(int count, LhsElement const *lhs, RhsElement const *rhs)
+{
+    float diff = 0.0f;
+    for (int i = 0; i < count; ++i) {
+        diff = std::max(diff, std::abs(to_float(lhs[i]) - to_float(rhs[i])));
+    }
+    return diff;
+}
+
+template <class Element>
+void corrupt_first(std::vector<Element> &data)
+{
+    if (!data.empty()) {
+        data[0] = from_float<Element>(to_float(data[0]) + 1.0f);
+    }
+}
+
 template <class ElementA, class ElementB, class ElementC>
 __global__ void conventional_gemm_kernel(ElementA const *A,
                                          int             stride_am,
