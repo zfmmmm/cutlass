@@ -49,7 +49,8 @@ struct IsSm80SimtElement
 template <class Element>
 struct IsSm80TensorOpElement
     : std::integral_constant<bool,
-                             std::is_same<Element, float>::value || // FP32（底层可能会转为 TF32 执行）
+                             std::is_same<Element, double>::value || // FP64 Tensor Core (DMMA)
+                                 std::is_same<Element, float>::value || // FP32（底层可能会转为 TF32 执行）
                                  std::is_same<Element, cutlass::tfloat32_t>::value || // TensorFloat-32 (TF32)
                                  std::is_same<Element, cutlass::half_t>::value ||     // FP16
                                  std::is_same<Element, cutlass::bfloat16_t>::value || // BF16
@@ -163,6 +164,75 @@ struct GmemVectorAlignment
                   "No legal cp.async vector width for this element type, tile extent, and physical alignment.");
 };
 
+template <int AlignmentElements, int ThreadCount, int TileMN, int TileK, bool IsMnMajor>
+struct IsLegalSimtGmemTiledCopyAlignment
+{
+    static constexpr bool value = [] {
+        if constexpr (AlignmentElements == 0) {
+            return false;
+        } else {
+            constexpr int MajorExtent = IsMnMajor ? TileMN : TileK;
+            constexpr int MinorExtent = IsMnMajor ? TileK : TileMN;
+            constexpr int MajorThreads =
+                (ThreadCount >= MajorExtent / AlignmentElements) ? (MajorExtent / AlignmentElements) : ThreadCount;
+            if constexpr (MajorThreads <= 0) {
+                return false;
+            } else if constexpr ((ThreadCount % MajorThreads) != 0) {
+                return false;
+            } else {
+                constexpr int MinorThreads = ThreadCount / MajorThreads;
+                return (MinorThreads == 0) || ((MinorExtent % MinorThreads) == 0);
+            }
+        }
+    }();
+};
+
+template <class Element, int TileMN, int TileK, int ThreadCount, bool IsMnMajor, int MaxAlignmentBytes = 16>
+struct GmemTiledCopyAlignment
+{
+    static_assert(MaxAlignmentBytes == 4 || MaxAlignmentBytes == 8 || MaxAlignmentBytes == 16,
+                  "Gmem alignment must be one of 4, 8, or 16 bytes.");
+
+    static constexpr int ElementBytes       = int(sizeof(Element));
+    static constexpr int ContiguousElements = IsMnMajor ? TileMN : TileK;
+    static constexpr int Align16 =
+        (MaxAlignmentBytes >= 16 && ElementBytes <= 16 && (16 % ElementBytes) == 0)
+            ? (16 / ElementBytes)
+            : 0;
+    static constexpr int Align8 = (MaxAlignmentBytes >= 8 && ElementBytes <= 8 && (8 % ElementBytes) == 0)
+                                    ? (8 / ElementBytes)
+                                    : 0;
+    static constexpr int Align4 = (MaxAlignmentBytes >= 4 && ElementBytes <= 4 && (4 % ElementBytes) == 0)
+                                    ? (4 / ElementBytes)
+                                    : 0;
+
+    static constexpr int value = [] {
+        if constexpr (Align16 != 0) {
+            if constexpr ((ContiguousElements % Align16) == 0
+                          && IsLegalSimtGmemTiledCopyAlignment<Align16, ThreadCount, TileMN, TileK, IsMnMajor>::value) {
+                return Align16;
+            }
+        }
+        if constexpr (Align8 != 0) {
+            if constexpr ((ContiguousElements % Align8) == 0
+                          && IsLegalSimtGmemTiledCopyAlignment<Align8, ThreadCount, TileMN, TileK, IsMnMajor>::value) {
+                return Align8;
+            }
+        }
+        if constexpr (Align4 != 0) {
+            if constexpr ((ContiguousElements % Align4) == 0
+                          && IsLegalSimtGmemTiledCopyAlignment<Align4, ThreadCount, TileMN, TileK, IsMnMajor>::value) {
+                return Align4;
+            }
+        }
+        return 0;
+    }();
+    static constexpr int bytes = value * ElementBytes;
+
+    static_assert(value != 0,
+                  "No legal gmem tiled-copy vector width for this element type, tile extent, thread layout, and physical alignment.");
+};
+
 // 计算 Shared Memory（共享内存）为了防止 Bank Conflict 需要的 Padding 数量。
 template <class Element> struct SmemPaddingElements
 {
@@ -204,9 +274,9 @@ struct Sm80SimtMainloopRole
 
     // 全局写回 (STG) 使用的对齐宽度。
     static constexpr int VectorAlignmentElements =
-        GmemVectorAlignment<Element, ContiguousDimLength, GmemAlignmentBytes>::value;
+        GmemTiledCopyAlignment<Element, TileMN, TileK, ThreadCount, IsMnMajor, GmemAlignmentBytes>::value;
     static constexpr int VectorAlignmentBytes =
-        GmemVectorAlignment<Element, ContiguousDimLength, GmemAlignmentBytes>::bytes;
+        GmemTiledCopyAlignment<Element, TileMN, TileK, ThreadCount, IsMnMajor, GmemAlignmentBytes>::bytes;
 
     // Gmem 到 Smem 的对齐宽度与连续维度匹配，优先使用 16B cp.async，不能整除时退到 8B/4B。
     static constexpr int GmemToSmemAlignmentElements = VectorAlignmentElements;
@@ -297,8 +367,9 @@ struct Sm80SimtRoleC
 
     static constexpr int ContiguousDimLength = IsMnMajor ? BlkM : BlkN;
     static constexpr int AlignmentElements =
-        GmemVectorAlignment<Element, ContiguousDimLength, GmemAlignmentBytes>::value;
-    static constexpr int AlignmentBytes = GmemVectorAlignment<Element, ContiguousDimLength, GmemAlignmentBytes>::bytes;
+        GmemTiledCopyAlignment<Element, BlkM, BlkN, ThreadCount, IsMnMajor, GmemAlignmentBytes>::value;
+    static constexpr int AlignmentBytes =
+        GmemTiledCopyAlignment<Element, BlkM, BlkN, ThreadCount, IsMnMajor, GmemAlignmentBytes>::bytes;
     static constexpr int GmemToSmemAlignmentBytes = AlignmentBytes;
     using AlignmentType                      = cute::uint_byte_t<AlignmentElements *int(sizeof(Element))>;
 
@@ -376,6 +447,12 @@ template <> struct Sm80TensorOpTraits<float> : Sm80TensorOpTraits<cutlass::tfloa
 {
 };
 
+template <> struct Sm80TensorOpTraits<double>
+{
+    using MmaOperation = cute::SM80_8x8x4_F64F64F64F64_TN;
+    using Accumulator  = double;
+};
+
 // 针对 INT8 的量化计算。
 template <> struct Sm80TensorOpTraits<int8_t>
 {
@@ -404,6 +481,12 @@ struct MmaOperandContiguity<cute::SM80_16x8x16_F32BF16BF16F32_TN, IsRoleA>
 
 template <bool IsRoleA>
 struct MmaOperandContiguity<cute::SM80_16x8x8_F32TF32TF32F32_TN, IsRoleA>
+{
+    static constexpr bool RequiresMnMajor = false;
+};
+
+template <bool IsRoleA>
+struct MmaOperandContiguity<cute::SM80_8x8x4_F64F64F64F64_TN, IsRoleA>
 {
     static constexpr bool RequiresMnMajor = false;
 };
@@ -551,8 +634,9 @@ struct Sm80TensorOpMainloopRole
     static constexpr bool IsMnMajor           = cutlass::gemm::detail::is_mn_major<GmemStride>();
     static constexpr int  ContiguousDimLength = IsMnMajor ? TileMN : TileK;
     static constexpr int AlignmentElements =
-        GmemVectorAlignment<Element, ContiguousDimLength, GmemAlignmentBytes>::value;
-    static constexpr int AlignmentBytes = GmemVectorAlignment<Element, ContiguousDimLength, GmemAlignmentBytes>::bytes;
+        GmemTiledCopyAlignment<Element, TileMN, TileK, ThreadCount, IsMnMajor, GmemAlignmentBytes>::value;
+    static constexpr int AlignmentBytes =
+        GmemTiledCopyAlignment<Element, TileMN, TileK, ThreadCount, IsMnMajor, GmemAlignmentBytes>::bytes;
     static constexpr int AlignmentBits  = AlignmentBytes * 8;
     static constexpr int GmemToSmemAlignmentElements = AlignmentElements;
     static constexpr int GmemToSmemAlignmentBytes    = AlignmentBytes;
@@ -683,9 +767,9 @@ struct Sm80TensorOpRoleC
     using RegToSmemCopy          = cute::Copy_Atom<RegToSmemCopyOperation, EpilogueElement>;
 
     static constexpr int OutputAlignmentElements =
-        GmemVectorAlignment<ElementOutput, ContiguousDimLength, GmemAlignmentBytes>::value;
+        GmemTiledCopyAlignment<ElementOutput, BlkM, BlkN, ThreadCount, IsMnMajor, GmemAlignmentBytes>::value;
     static constexpr int OutputAlignmentBytes =
-        GmemVectorAlignment<ElementOutput, ContiguousDimLength, GmemAlignmentBytes>::bytes;
+        GmemTiledCopyAlignment<ElementOutput, BlkM, BlkN, ThreadCount, IsMnMajor, GmemAlignmentBytes>::bytes;
     static constexpr int OutputAlignmentBits = OutputAlignmentBytes * 8;
     static constexpr int GmemToSmemAlignmentBytes = OutputAlignmentBytes;
     using OutputAlignmentType = cute::uint_byte_t<OutputAlignmentBytes>;

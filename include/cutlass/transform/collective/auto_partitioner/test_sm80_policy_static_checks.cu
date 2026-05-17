@@ -149,6 +149,29 @@ static_assert(PartB_K32::SwizzleBase == 2, "FP16 TileK=32 uses a 64-byte swizzle
 static_assert(cute::cosize_v<typename PartA_K32::SmemLayout> > 0, "TileK=32 A shared layout must be valid.");
 static_assert(cute::cosize_v<typename PartB_K32::SmemLayout> > 0, "TileK=32 B shared layout must be valid.");
 
+using DoubleTileShape = cute::Shape<cute::Int<16>, cute::Int<16>, cute::Int<8>>;
+using DoublePartA = typename autopartition::AutoPartitioner<ArchTag,
+                                                            OpClass,
+                                                            double,
+                                                            StrideA,
+                                                            DoubleTileShape,
+                                                            ThreadCount>::RoleA;
+using DoublePartC = typename autopartition::AutoPartitioner<ArchTag,
+                                                            OpClass,
+                                                            double,
+                                                            StrideC,
+                                                            DoubleTileShape,
+                                                            ThreadCount>::RoleC;
+
+static_assert(autopartition::detail::IsSm80TensorOpElement<double>::value,
+              "SM80 TensorOp should support double through DMMA.");
+static_assert(std::is_same<typename autopartition::detail::Sm80TensorOpTraits<double>::MmaOperation,
+                           cute::SM80_8x8x4_F64F64F64F64_TN>::value,
+              "double TensorOp should bind SM80 DMMA.");
+static_assert(std::is_same<typename DoublePartC::Accumulator, double>::value,
+              "double TensorOp accumulates in double.");
+static_assert(cute::cosize_v<typename DoublePartA::SmemLayout> > 0, "Double RoleA shared layout must instantiate.");
+
 } // namespace
 
 int main() { return 0; }
