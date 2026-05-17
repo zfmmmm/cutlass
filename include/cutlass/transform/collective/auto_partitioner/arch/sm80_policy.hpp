@@ -115,25 +115,52 @@ template <int TileM, int TileN, int ThreadCount> struct OptimalTensorOpThreadLay
 // ==================================================================
 
 // 动态推导 Global Memory（显存）访问的最优向量化粒度（16B, 8B, 4B）。
-template <class Element, int ContiguousElements> // ContiguousElements 指在内存中最内层连续的元素数量
+template <class Element,
+          int ContiguousElements,
+          int MaxAlignmentBytes = 16> // ContiguousElements 指在内存中最内层连续的元素数量
 struct GmemVectorAlignment
 {
+    static_assert(MaxAlignmentBytes == 4 || MaxAlignmentBytes == 8 || MaxAlignmentBytes == 16,
+                  "Gmem alignment must be one of 4, 8, or 16 bytes.");
+
     static constexpr int ElementBytes = int(sizeof(Element)); // 单个元素占据的字节数
 
     // 计算满足 16B/8B/4B 对齐分别需要多少个元素。
     // SM80 架构下单线程单次内存事务最高效的宽度是 128-bit (16 Bytes)，常用于 cp.async 指令。
-    static constexpr int Align16 = (ElementBytes <= 16 && (16 % ElementBytes) == 0) ? (16 / ElementBytes) : 0;
-    static constexpr int Align8  = (ElementBytes <= 8 && (8 % ElementBytes) == 0) ? (8 / ElementBytes) : 0;
-    static constexpr int Align4  = (ElementBytes <= 4 && (4 % ElementBytes) == 0) ? (4 / ElementBytes) : 0;
+    static constexpr int Align16 = (MaxAlignmentBytes >= 16 && ElementBytes <= 16 && (16 % ElementBytes) == 0)
+                                     ? (16 / ElementBytes)
+                                     : 0;
+    static constexpr int Align8 = (MaxAlignmentBytes >= 8 && ElementBytes <= 8 && (8 % ElementBytes) == 0)
+                                    ? (8 / ElementBytes)
+                                    : 0;
+    static constexpr int Align4 = (MaxAlignmentBytes >= 4 && ElementBytes <= 4 && (4 % ElementBytes) == 0)
+                                    ? (4 / ElementBytes)
+                                    : 0;
 
     // 贪心策略：优先选择能被连续元素个数整除的最大对齐宽度。
-    static constexpr int value = (Align16 != 0 && (ContiguousElements % Align16) == 0) ? Align16
-                               : (Align8 != 0 && (ContiguousElements % Align8) == 0)   ? Align8
-                               : (Align4 != 0 && (ContiguousElements % Align4) == 0)   ? Align4
-                                                                                       : 0;
+    static constexpr int value = [] {
+        if constexpr (Align16 != 0) {
+            if constexpr ((ContiguousElements % Align16) == 0) {
+                return Align16;
+            }
+        }
+        if constexpr (Align8 != 0) {
+            if constexpr ((ContiguousElements % Align8) == 0) {
+                return Align8;
+            }
+        }
+        if constexpr (Align4 != 0) {
+            if constexpr ((ContiguousElements % Align4) == 0) {
+                return Align4;
+            }
+        }
+        return 0;
+    }();
+    static constexpr int bytes = value * ElementBytes;
 
     // 防御性断言：如果找不到合法的向量化宽度（通常说明参数配置极其恶劣或不对齐），在编译期熔断。
-    static_assert(value != 0, "No legal cp.async vector width for this element type and contiguous tile extent.");
+    static_assert(value != 0,
+                  "No legal cp.async vector width for this element type, tile extent, and physical alignment.");
 };
 
 // 计算 Shared Memory（共享内存）为了防止 Bank Conflict 需要的 Padding 数量。
@@ -176,10 +203,14 @@ struct Sm80SimtMainloopRole
     static constexpr int ContiguousDimLength = IsMnMajor ? TileMN : TileK;
 
     // 全局写回 (STG) 使用的对齐宽度。
-    static constexpr int VectorAlignmentElements = GmemVectorAlignment<Element, ContiguousDimLength>::value;
+    static constexpr int VectorAlignmentElements =
+        GmemVectorAlignment<Element, ContiguousDimLength, GmemAlignmentBytes>::value;
+    static constexpr int VectorAlignmentBytes =
+        GmemVectorAlignment<Element, ContiguousDimLength, GmemAlignmentBytes>::bytes;
 
     // Gmem 到 Smem 的对齐宽度与连续维度匹配，优先使用 16B cp.async，不能整除时退到 8B/4B。
     static constexpr int GmemToSmemAlignmentElements = VectorAlignmentElements;
+    static constexpr int GmemToSmemAlignmentBytes    = VectorAlignmentBytes;
     using AlignmentType = cute::uint_byte_t<GmemToSmemAlignmentElements *int(sizeof(Element))>;
 
     // 构建 Gmem 到 Smem 的 Copy_Atom。此处采用 SM80 独有的 CP.ASYNC 硬件指令。
@@ -265,7 +296,10 @@ struct Sm80SimtRoleC
     using SmemLayout = SmemLayoutAtom;
 
     static constexpr int ContiguousDimLength = IsMnMajor ? BlkM : BlkN;
-    static constexpr int AlignmentElements   = GmemVectorAlignment<Element, ContiguousDimLength>::value;
+    static constexpr int AlignmentElements =
+        GmemVectorAlignment<Element, ContiguousDimLength, GmemAlignmentBytes>::value;
+    static constexpr int AlignmentBytes = GmemVectorAlignment<Element, ContiguousDimLength, GmemAlignmentBytes>::bytes;
+    static constexpr int GmemToSmemAlignmentBytes = AlignmentBytes;
     using AlignmentType                      = cute::uint_byte_t<AlignmentElements *int(sizeof(Element))>;
 
     // 与 Mainloop 不同，C 矩阵的 GmemToSmem 这里强制使用了最大 AlignmentElements，
@@ -451,8 +485,12 @@ struct Sm80TensorOpMainloopRole
 {
     static constexpr bool IsMnMajor           = cutlass::gemm::detail::is_mn_major<GmemStride>();
     static constexpr int  ContiguousDimLength = IsMnMajor ? TileMN : TileK;
-    static constexpr int  AlignmentElements   = GmemVectorAlignment<Element, ContiguousDimLength>::value;
-    static constexpr int  AlignmentBits       = AlignmentElements * int(sizeof(Element)) * 8;
+    static constexpr int AlignmentElements =
+        GmemVectorAlignment<Element, ContiguousDimLength, GmemAlignmentBytes>::value;
+    static constexpr int AlignmentBytes = GmemVectorAlignment<Element, ContiguousDimLength, GmemAlignmentBytes>::bytes;
+    static constexpr int AlignmentBits  = AlignmentBytes * 8;
+    static constexpr int GmemToSmemAlignmentElements = AlignmentElements;
+    static constexpr int GmemToSmemAlignmentBytes    = AlignmentBytes;
 
     // 判断是否具备开启极致性能 LdMatrix 指令的条件：
     // 1. 类型必须是 16bit 浮点。
@@ -558,8 +596,12 @@ struct Sm80TensorOpRoleC
     using SmemLayout = SmemLayoutAtom;
 
     static constexpr int ContiguousDimLength = IsMnMajor ? BlkM : BlkN;
-    static constexpr int AlignmentElements   = GmemVectorAlignment<EpilogueElement, ContiguousDimLength>::value;
-    static constexpr int AlignmentBits       = AlignmentElements * int(sizeof(EpilogueElement)) * 8;
+    static constexpr int AlignmentElements =
+        GmemVectorAlignment<EpilogueElement, ContiguousDimLength, GmemAlignmentBytes>::value;
+    static constexpr int AlignmentBytes =
+        GmemVectorAlignment<EpilogueElement, ContiguousDimLength, GmemAlignmentBytes>::bytes;
+    static constexpr int AlignmentBits = AlignmentBytes * 8;
+    static constexpr int GmemToSmemAlignmentBytes = AlignmentBytes;
     using AlignmentType                      = cute::uint_byte_t<AlignmentElements *int(sizeof(EpilogueElement))>;
 
     // 后处理的各类 Copy 设置，按 C 的连续维度推导实际可承诺的向量宽度。

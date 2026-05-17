@@ -68,8 +68,8 @@ template <> struct Sm100TensorOpAccumulator<uint8_t>
     using type = int32_t;
 };
 
-template <class Element, int ContiguousElements>
-struct Sm100GmemVectorAlignment : GmemVectorAlignment<Element, ContiguousElements>
+template <class Element, int ContiguousElements, int MaxAlignmentBytes = 16>
+struct Sm100GmemVectorAlignment : GmemVectorAlignment<Element, ContiguousElements, MaxAlignmentBytes>
 {
 };
 

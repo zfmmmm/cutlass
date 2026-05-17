@@ -63,6 +63,38 @@ static_assert(cute::cosize_v<typename ExtendedPartA::SmemLayout> > 0, "Extended 
 static_assert(cute::cosize_v<typename ExtendedPartB::SmemLayout> > 0, "Extended RoleB must instantiate.");
 static_assert(cute::cosize_v<typename ExtendedPartC::SmemLayout> > 0, "Extended RoleC must instantiate.");
 
+using SimtArch = cutlass::arch::Sm80;
+using SimtOpClass = cutlass::arch::OpClassSimt;
+using FloatElement = float;
+using SimtStrideA = cute::Stride<cute::_1, int64_t>;
+using SimtTileShape = cute::Shape<cute::Int<64>, cute::Int<64>, cute::Int<16>>;
+constexpr int SimtThreadCount = 256;
+
+using SimtPartA16 = typename autopartition::AutoPartitioner<SimtArch,
+                                                            SimtOpClass,
+                                                            FloatElement,
+                                                            SimtStrideA,
+                                                            SimtTileShape,
+                                                            SimtThreadCount,
+                                                            FloatElement,
+                                                            16,
+                                                            16,
+                                                            16>::RoleA;
+using SimtPartA4 = typename autopartition::AutoPartitioner<SimtArch,
+                                                           SimtOpClass,
+                                                           FloatElement,
+                                                           SimtStrideA,
+                                                           SimtTileShape,
+                                                           SimtThreadCount,
+                                                           FloatElement,
+                                                           4,
+                                                           16,
+                                                           16>::RoleA;
+
+static_assert(SimtPartA16::GmemToSmemAlignmentBytes == 16, "16-byte physical alignment should allow 16-byte cp.async.");
+static_assert(SimtPartA4::GmemToSmemAlignmentBytes == 4, "4-byte physical alignment should force 4-byte cp.async.");
+static_assert(SimtPartA4::GmemToSmemAlignmentElements == 1, "float 4-byte copy uses one element.");
+
 } // namespace
 
 int main() { return 0; }
