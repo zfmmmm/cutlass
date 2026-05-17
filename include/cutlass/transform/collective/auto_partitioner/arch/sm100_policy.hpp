@@ -452,13 +452,24 @@ template <class Element, class GmemStride, class TileShape_MNK, int ThreadCount>
 } // namespace detail
 
 // ------------------------------ SFINAE 外部偏特化：SM100 ------------------------------
-template <typename Element, typename GmemStride, typename TileShape_MNK, int ThreadCount>
+template <typename Element,
+          typename GmemStride,
+          typename TileShape_MNK,
+          int ThreadCount,
+          typename ElementC,
+          int GmemAlignmentA,
+          int GmemAlignmentB,
+          int GmemAlignmentC>
 struct AutoPartitioner<cutlass::arch::Sm100,
                        cutlass::arch::OpClassSimt,
                        Element,
                        GmemStride,
                        TileShape_MNK,
                        ThreadCount,
+                       ElementC,
+                       GmemAlignmentA,
+                       GmemAlignmentB,
+                       GmemAlignmentC,
                        std::enable_if_t<detail::IsSm100SimtElement<Element>::value>>
 {
     using RoleA = detail::Sm100SimtRoleA<Element, GmemStride, TileShape_MNK, ThreadCount>;
@@ -466,13 +477,24 @@ struct AutoPartitioner<cutlass::arch::Sm100,
     using RoleC = detail::Sm100SimtRoleC<Element, GmemStride, TileShape_MNK, ThreadCount>;
 };
 
-template <typename Element, typename GmemStride, typename TileShape_MNK, int ThreadCount>
+template <typename Element,
+          typename GmemStride,
+          typename TileShape_MNK,
+          int ThreadCount,
+          typename ElementC,
+          int GmemAlignmentA,
+          int GmemAlignmentB,
+          int GmemAlignmentC>
 struct AutoPartitioner<cutlass::arch::Sm100,
                        cutlass::arch::OpClassTensorOp,
                        Element,
                        GmemStride,
                        TileShape_MNK,
                        ThreadCount,
+                       ElementC,
+                       GmemAlignmentA,
+                       GmemAlignmentB,
+                       GmemAlignmentC,
                        std::enable_if_t<detail::IsSm100TensorOpElement<Element>::value>>
 {
     using RoleA = detail::Sm100TensorOpRoleA<Element, GmemStride, TileShape_MNK, ThreadCount>;
@@ -485,29 +507,51 @@ struct AutoPartitioner<cutlass::arch::Sm100,
 // SM120 仍然保留 SM100 UMMA/TMEM 语义，同时增加 FP4/FP8 等高阶路径。
 // AutoPartitioner 这里先复用 SM100 的稳定蓝图，保证 ArchTag=Sm120 能参与路由；
 // 后续如要支持 SM120 blockscaled/sparse，可继续加独立 sm120_policy.hpp。
-template <typename Element, typename GmemStride, typename TileShape_MNK, int ThreadCount>
+template <typename Element,
+          typename GmemStride,
+          typename TileShape_MNK,
+          int ThreadCount,
+          typename ElementC,
+          int GmemAlignmentA,
+          int GmemAlignmentB,
+          int GmemAlignmentC>
 struct AutoPartitioner<cutlass::arch::Sm120,
                        cutlass::arch::OpClassSimt,
                        Element,
                        GmemStride,
                        TileShape_MNK,
                        ThreadCount,
+                       ElementC,
+                       GmemAlignmentA,
+                       GmemAlignmentB,
+                       GmemAlignmentC,
                        std::enable_if_t<detail::IsSm100SimtElement<Element>::value>>
 {
     // sm_120 当前未启用 SM100 f32x2 SIMT PTX 宏，因此实际可执行示例走
     // UniversalFMA SIMT 图纸；SM100 原生 policy 仍保留在 ArchTag=Sm100。
-    using RoleA = detail::Sm80SimtRoleA<Element, GmemStride, TileShape_MNK, ThreadCount>;
-    using RoleB = detail::Sm80SimtRoleB<Element, GmemStride, TileShape_MNK, ThreadCount>;
-    using RoleC = detail::Sm80SimtRoleC<Element, GmemStride, TileShape_MNK, ThreadCount>;
+    using RoleA = detail::Sm80SimtRoleA<Element, GmemStride, TileShape_MNK, ThreadCount, GmemAlignmentA>;
+    using RoleB = detail::Sm80SimtRoleB<Element, GmemStride, TileShape_MNK, ThreadCount, GmemAlignmentB>;
+    using RoleC = detail::Sm80SimtRoleC<Element, ElementC, GmemStride, TileShape_MNK, ThreadCount, GmemAlignmentC>;
 };
 
-template <typename Element, typename GmemStride, typename TileShape_MNK, int ThreadCount>
+template <typename Element,
+          typename GmemStride,
+          typename TileShape_MNK,
+          int ThreadCount,
+          typename ElementC,
+          int GmemAlignmentA,
+          int GmemAlignmentB,
+          int GmemAlignmentC>
 struct AutoPartitioner<cutlass::arch::Sm120,
                        cutlass::arch::OpClassTensorOp,
                        Element,
                        GmemStride,
                        TileShape_MNK,
                        ThreadCount,
+                       ElementC,
+                       GmemAlignmentA,
+                       GmemAlignmentB,
+                       GmemAlignmentC,
                        std::enable_if_t<detail::IsSm100TensorOpElement<Element>::value>>
 {
     using RoleA = detail::Sm100TensorOpRoleA<Element, GmemStride, TileShape_MNK, ThreadCount>;
@@ -515,13 +559,24 @@ struct AutoPartitioner<cutlass::arch::Sm120,
     using RoleC = detail::Sm100TensorOpRoleC<Element, GmemStride, TileShape_MNK, ThreadCount>;
 };
 
-template <typename Element, typename GmemStride, typename TileShape_MNK, int ThreadCount>
+template <typename Element,
+          typename GmemStride,
+          typename TileShape_MNK,
+          int ThreadCount,
+          typename ElementC,
+          int GmemAlignmentA,
+          int GmemAlignmentB,
+          int GmemAlignmentC>
 struct AutoPartitioner<cutlass::arch::Sm120,
                        cutlass::arch::OpClassTensorOp,
                        Element,
                        GmemStride,
                        TileShape_MNK,
                        ThreadCount,
+                       ElementC,
+                       GmemAlignmentA,
+                       GmemAlignmentB,
+                       GmemAlignmentC,
                        std::enable_if_t<detail::IsSm120TensorOpElement<Element>::value>>
 {
     using RoleA = detail::Sm120TensorOpRoleA<Element, GmemStride, TileShape_MNK, ThreadCount>;

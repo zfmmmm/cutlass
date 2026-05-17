@@ -19,10 +19,14 @@ template <typename ArchTag,
           typename GmemStride,
           typename TileShape_MNK,
           int ThreadCount,
+          typename ElementC = Element,
+          int GmemAlignmentA = 16,
+          int GmemAlignmentB = 16,
+          int GmemAlignmentC = 16,
           typename Enable = void>
 struct AutoPartitioner
 {
     static_assert(sizeof(Element) == 0,
-                  "[AutoPartitioner] Unsupported parameters! Check ArchTag, OpClass, or Element.");
+                  "[AutoPartitioner] Unsupported parameters! Check ArchTag, OpClass, Element, or alignment.");
 };
 } // namespace autopartition

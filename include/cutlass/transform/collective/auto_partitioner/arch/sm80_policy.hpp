@@ -156,7 +156,8 @@ using VectorizedCopyAtom =
 // ==================================================================
 
 // 为 SIMT 提取 A 和 B 矩阵在主循环（Mainloop）中的公共访存和布局特征。
-template <class Element, class GmemStride, int TileMN, int TileK, int ThreadCount> struct Sm80SimtMainloopRole
+template <class Element, class GmemStride, int TileMN, int TileK, int ThreadCount, int GmemAlignmentBytes>
+struct Sm80SimtMainloopRole
 {
     // 判断 Global Memory 传进来的 Stride 是按 M/N 连续（Col/Row-Major）还是 K 连续。
     static constexpr bool IsMnMajor = cutlass::gemm::detail::is_mn_major<GmemStride>();
@@ -216,29 +217,32 @@ template <class Element, class GmemStride, int TileMN, int TileK, int ThreadCoun
 };
 
 // A 矩阵特化（M 维度参与推导）
-template <class Element, class GmemStride, class TileShape_MNK, int ThreadCount>
+template <class Element, class GmemStride, class TileShape_MNK, int ThreadCount, int GmemAlignmentBytes>
 struct Sm80SimtRoleA
     : Sm80SimtMainloopRole<Element,
                            GmemStride,
                            cute::size<0>(TileShape_MNK{}),
                            cute::size<2>(TileShape_MNK{}),
-                           ThreadCount>
+                           ThreadCount,
+                           GmemAlignmentBytes>
 {
 };
 
 // B 矩阵特化（N 维度参与推导）
-template <class Element, class GmemStride, class TileShape_MNK, int ThreadCount>
+template <class Element, class GmemStride, class TileShape_MNK, int ThreadCount, int GmemAlignmentBytes>
 struct Sm80SimtRoleB
     : Sm80SimtMainloopRole<Element,
                            GmemStride,
                            cute::size<1>(TileShape_MNK{}),
                            cute::size<2>(TileShape_MNK{}),
-                           ThreadCount>
+                           ThreadCount,
+                           GmemAlignmentBytes>
 {
 };
 
 // C 矩阵 / Accumulator 在 SIMT 模式下的定义。
-template <class Element, class GmemStride, class TileShape_MNK, int ThreadCount> struct Sm80SimtRoleC
+template <class Element, class ElementC, class GmemStride, class TileShape_MNK, int ThreadCount, int GmemAlignmentBytes>
+struct Sm80SimtRoleC
 {
     static constexpr int BlkM = cute::size<0>(TileShape_MNK{});
     static constexpr int BlkN = cute::size<1>(TileShape_MNK{});
@@ -442,7 +446,7 @@ struct Sm80TensorOpTiledMmaSelector<cutlass::bfloat16_t, MmaAtom, ThreadLayout>
 
 
 // ---------------- TensorOp A/B 矩阵通用构建协议 ----------------
-template <class Element, class GmemStride, int TileMN, int TileK, int ThreadCount, bool IsRoleA>
+template <class Element, class GmemStride, int TileMN, int TileK, int ThreadCount, bool IsRoleA, int GmemAlignmentBytes>
 struct Sm80TensorOpMainloopRole
 {
     static constexpr bool IsMnMajor           = cutlass::gemm::detail::is_mn_major<GmemStride>();
@@ -500,30 +504,33 @@ struct Sm80TensorOpMainloopRole
 };
 
 // 特化 RoleA/RoleB
-template <class Element, class GmemStride, class TileShape_MNK, int ThreadCount>
+template <class Element, class GmemStride, class TileShape_MNK, int ThreadCount, int GmemAlignmentBytes>
 struct Sm80TensorOpRoleA
     : Sm80TensorOpMainloopRole<Element,
                                GmemStride,
                                cute::size<0>(TileShape_MNK{}),
                                cute::size<2>(TileShape_MNK{}),
                                ThreadCount,
-                               true>
+                               true,
+                               GmemAlignmentBytes>
 {
 };
 
-template <class Element, class GmemStride, class TileShape_MNK, int ThreadCount>
+template <class Element, class GmemStride, class TileShape_MNK, int ThreadCount, int GmemAlignmentBytes>
 struct Sm80TensorOpRoleB
     : Sm80TensorOpMainloopRole<Element,
                                GmemStride,
                                cute::size<1>(TileShape_MNK{}),
                                cute::size<2>(TileShape_MNK{}),
                                ThreadCount,
-                               false>
+                               false,
+                               GmemAlignmentBytes>
 {
 };
 
 // C矩阵 (输出累加) 特化
-template <class Element, class GmemStride, class TileShape_MNK, int ThreadCount> struct Sm80TensorOpRoleC
+template <class Element, class ElementC, class GmemStride, class TileShape_MNK, int ThreadCount, int GmemAlignmentBytes>
+struct Sm80TensorOpRoleC
 {
     static constexpr int BlkM = cute::size<0>(TileShape_MNK{});
     static constexpr int BlkN = cute::size<1>(TileShape_MNK{});
@@ -591,33 +598,55 @@ template <class Element, class GmemStride, class TileShape_MNK, int ThreadCount>
 // 映射到全局通用接口 AutoPartitioner 上。
 
 // SIMT 分支装载。仅当 OpClass 为 OpClassSimt 且该元素支持 SIMT 时匹配该模板特化。
-template <typename Element, typename GmemStride, typename TileShape_MNK, int ThreadCount>
+template <typename Element,
+          typename GmemStride,
+          typename TileShape_MNK,
+          int ThreadCount,
+          typename ElementC,
+          int GmemAlignmentA,
+          int GmemAlignmentB,
+          int GmemAlignmentC>
 struct AutoPartitioner<cutlass::arch::Sm80,
                        cutlass::arch::OpClassSimt,
                        Element,
                        GmemStride,
                        TileShape_MNK,
                        ThreadCount,
+                       ElementC,
+                       GmemAlignmentA,
+                       GmemAlignmentB,
+                       GmemAlignmentC,
                        std::enable_if_t<detail::IsSm80SimtElement<Element>::value>>
 {
-    using RoleA = detail::Sm80SimtRoleA<Element, GmemStride, TileShape_MNK, ThreadCount>;
-    using RoleB = detail::Sm80SimtRoleB<Element, GmemStride, TileShape_MNK, ThreadCount>;
-    using RoleC = detail::Sm80SimtRoleC<Element, GmemStride, TileShape_MNK, ThreadCount>;
+    using RoleA = detail::Sm80SimtRoleA<Element, GmemStride, TileShape_MNK, ThreadCount, GmemAlignmentA>;
+    using RoleB = detail::Sm80SimtRoleB<Element, GmemStride, TileShape_MNK, ThreadCount, GmemAlignmentB>;
+    using RoleC = detail::Sm80SimtRoleC<Element, ElementC, GmemStride, TileShape_MNK, ThreadCount, GmemAlignmentC>;
 };
 
 // TensorOp 分支装载。仅当 OpClass 为 OpClassTensorOp 且该元素支持 TensorOp 时匹配。
-template <typename Element, typename GmemStride, typename TileShape_MNK, int ThreadCount>
+template <typename Element,
+          typename GmemStride,
+          typename TileShape_MNK,
+          int ThreadCount,
+          typename ElementC,
+          int GmemAlignmentA,
+          int GmemAlignmentB,
+          int GmemAlignmentC>
 struct AutoPartitioner<cutlass::arch::Sm80,
                        cutlass::arch::OpClassTensorOp,
                        Element,
                        GmemStride,
                        TileShape_MNK,
                        ThreadCount,
+                       ElementC,
+                       GmemAlignmentA,
+                       GmemAlignmentB,
+                       GmemAlignmentC,
                        std::enable_if_t<detail::IsSm80TensorOpElement<Element>::value>>
 {
-    using RoleA = detail::Sm80TensorOpRoleA<Element, GmemStride, TileShape_MNK, ThreadCount>;
-    using RoleB = detail::Sm80TensorOpRoleB<Element, GmemStride, TileShape_MNK, ThreadCount>;
-    using RoleC = detail::Sm80TensorOpRoleC<Element, GmemStride, TileShape_MNK, ThreadCount>;
+    using RoleA = detail::Sm80TensorOpRoleA<Element, GmemStride, TileShape_MNK, ThreadCount, GmemAlignmentA>;
+    using RoleB = detail::Sm80TensorOpRoleB<Element, GmemStride, TileShape_MNK, ThreadCount, GmemAlignmentB>;
+    using RoleC = detail::Sm80TensorOpRoleC<Element, ElementC, GmemStride, TileShape_MNK, ThreadCount, GmemAlignmentC>;
 };
 
 } // namespace autopartition
