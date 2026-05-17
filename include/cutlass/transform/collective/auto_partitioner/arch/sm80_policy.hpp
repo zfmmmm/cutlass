@@ -452,12 +452,30 @@ struct Sm80TensorOpSmemCopyOperation<Element, MmaOperation, IsRoleA, SmemIsMnMaj
 
 
 // ---------------- Swizzle (地址异或置换) Layout 生成器 ----------------
+template <class Element, int TileK>
+struct Sm80TensorOpSwizzleRow
+{
+    static constexpr int RowBytes = TileK * int(sizeof(Element));
+    static constexpr int Bytes = (RowBytes >= 128 && (RowBytes % 128) == 0) ? 128
+                               : (RowBytes >= 64 && (RowBytes % 64) == 0)   ? 64
+                               : (RowBytes >= 32 && (RowBytes % 32) == 0)   ? 32
+                                                                            : 0;
+    static constexpr int Base = (Bytes == 128) ? 3 : (Bytes == 64) ? 2 : (Bytes == 32) ? 1 : 0;
+    static constexpr int Elements = Bytes / int(sizeof(Element));
+    static constexpr bool Supported = (Bytes != 0);
+};
+
 template <class Element, int TileMN, int TileK, bool UseLdMatrix, bool IsMnMajor> struct Sm80TensorOpSmemLayoutSelector;
 
 // K-major shared：逻辑第二维 K 连续，cp.async 顺着 K 写，LDSM_N 原样读。
 template <class Element, int TileMN, int TileK>
 struct Sm80TensorOpSmemLayoutSelector<Element, TileMN, TileK, true, false>
 {
+    static constexpr int SwizzleBase = Sm80TensorOpSwizzleRow<Element, TileK>::Base;
+    static constexpr int RowElements = Sm80TensorOpSwizzleRow<Element, TileK>::Elements;
+    static_assert(Sm80TensorOpSwizzleRow<Element, TileK>::Supported,
+                  "LdMatrix shared layout requires a 32, 64, or 128 byte row.");
+
     // Swizzle 的核心目的是解决极高带宽访存时的 Shared Memory Bank Conflict。
     // Swizzle<3, 3, 3> 表示对地址坐标的特定比特位执行异或（XOR）操作。
     // 第一个 3 (Base): XOR 开始的比特偏移。
@@ -466,8 +484,9 @@ struct Sm80TensorOpSmemLayoutSelector<Element, TileMN, TileK, true, false>
     // 在这里配合后面的 Shape<_8, _64>，它实现的是经典的 128 Bytes 颗粒度 Swizzle (16 个 FP16 =
     // 32B，乘以跨度构成了物理上错位存储）。
     using SwizzleAtom = decltype(cute::composition(
-        cute::Swizzle<3, 3, 3>{},
-        cute::Layout<cute::Shape<cute::_8, cute::_64>, cute::Stride<cute::_64, cute::_1>>{})); // 行主序核心块
+        cute::Swizzle<SwizzleBase, 3, 3>{},
+        cute::Layout<cute::Shape<cute::_8, cute::Int<RowElements>>,
+                     cute::Stride<cute::Int<RowElements>, cute::_1>>{})); // 行主序核心块
     // 将 Tile 形状映射到带 Swizzle 特性的物理地址布局中
     using type = decltype(cute::tile_to_shape(SwizzleAtom{}, cute::Shape<cute::Int<TileMN>, cute::Int<TileK>>{}));
 };
@@ -476,11 +495,17 @@ struct Sm80TensorOpSmemLayoutSelector<Element, TileMN, TileK, true, false>
 template <class Element, int TileMN, int TileK>
 struct Sm80TensorOpSmemLayoutSelector<Element, TileMN, TileK, true, true>
 {
+    static constexpr int SwizzleBase = Sm80TensorOpSwizzleRow<Element, TileK>::Base;
+    static constexpr int RowElements = Sm80TensorOpSwizzleRow<Element, TileK>::Elements;
+    static_assert(Sm80TensorOpSwizzleRow<Element, TileK>::Supported,
+                  "LdMatrix shared layout requires a 32, 64, or 128 byte row.");
+
     // 这里保持 Global 的 M/N 连续方向不变，Shared 也按 M/N 连续落地；
     // 后续 LDSM_T 在 shared -> register 的瞬间完成 Tensor Core 所需的转置。
     using SwizzleAtom = decltype(cute::composition(
-        cute::Swizzle<3, 3, 3>{},
-        cute::Layout<cute::Shape<cute::_64, cute::_8>, cute::Stride<cute::_1, cute::_64>>{}));
+        cute::Swizzle<SwizzleBase, 3, 3>{},
+        cute::Layout<cute::Shape<cute::Int<RowElements>, cute::_8>,
+                     cute::Stride<cute::_1, cute::Int<RowElements>>>{}));
     using type = decltype(cute::tile_to_shape(SwizzleAtom{}, cute::Shape<cute::Int<TileMN>, cute::Int<TileK>>{}));
 };
 
@@ -538,7 +563,8 @@ struct Sm80TensorOpMainloopRole
     // 3. K 维度的块长必须是 64 的倍数（为了与 128 Bytes/行 的最佳 Swizzle 适配，64 个 FP16 = 128B）。
     static constexpr bool UseLdMatrix =
         (std::is_same<Element, cutlass::half_t>::value || std::is_same<Element, cutlass::bfloat16_t>::value)
-        && (TileMN % 8 == 0) && (TileK % 64 == 0);
+        && (TileMN % 8 == 0) && Sm80TensorOpSwizzleRow<Element, TileK>::Supported;
+    static constexpr int SwizzleBase = UseLdMatrix ? Sm80TensorOpSwizzleRow<Element, TileK>::Base : 0;
     using MmaOperation = typename Sm80TensorOpTraits<Element>::MmaOperation;
 
     // 基于上述判断抽取当前应当使用的 SmemLayout。

@@ -119,6 +119,27 @@ static_assert(std::is_same<typename PartA_KMajor::SmemToRegCopyOperation, cute::
 static_assert(std::is_same<typename PartB_MnMajor::SmemToRegCopyOperation, cute::SM75_U16x8_LDSM_T>::value,
               "Transpose ldmatrix should use LDSM_T x4.");
 
+using TileShapeK32 = cute::Shape<cute::Int<64>, cute::Int<64>, cute::Int<32>>;
+using PartA_K32 = typename autopartition::AutoPartitioner<ArchTag,
+                                                          OpClass,
+                                                          Element,
+                                                          StrideA,
+                                                          TileShapeK32,
+                                                          ThreadCount>::RoleA;
+using PartB_K32 = typename autopartition::AutoPartitioner<ArchTag,
+                                                          OpClass,
+                                                          Element,
+                                                          StrideB,
+                                                          TileShapeK32,
+                                                          ThreadCount>::RoleB;
+
+static_assert(PartA_K32::UseLdMatrix, "FP16 TileK=32 should keep ldmatrix enabled.");
+static_assert(PartB_K32::UseLdMatrix, "FP16 TileK=32 should keep ldmatrix enabled.");
+static_assert(PartA_K32::SwizzleBase == 2, "FP16 TileK=32 uses a 64-byte swizzle row.");
+static_assert(PartB_K32::SwizzleBase == 2, "FP16 TileK=32 uses a 64-byte swizzle row.");
+static_assert(cute::cosize_v<typename PartA_K32::SmemLayout> > 0, "TileK=32 A shared layout must be valid.");
+static_assert(cute::cosize_v<typename PartB_K32::SmemLayout> > 0, "TileK=32 B shared layout must be valid.");
+
 } // namespace
 
 int main() { return 0; }
