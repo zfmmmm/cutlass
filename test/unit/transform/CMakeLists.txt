@@ -29,12 +29,14 @@
 add_subdirectory(threadblock)
 add_subdirectory(device)
 add_subdirectory(kernel)
+add_subdirectory(collective)
 
 add_custom_target(
   cutlass_test_unit_transform
   DEPENDS
   cutlass_test_unit_transform_threadblock
   cutlass_test_unit_transform_kernel
+  cutlass_test_unit_transform_collective
 )
 
 add_custom_target(
@@ -42,4 +44,5 @@ add_custom_target(
   DEPENDS
   test_unit_transform_threadblock
   test_unit_transform_kernel
+  test_unit_transform_collective
 )

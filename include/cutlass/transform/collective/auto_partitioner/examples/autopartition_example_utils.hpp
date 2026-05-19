@@ -1,12 +1,11 @@
 #pragma once
 
-#include <cuda_runtime.h>
-#include <cute/tensor.hpp>
-#include <cutlass/numeric_conversion.h>
-
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cuda_runtime.h>
+#include <cute/tensor.hpp>
+#include <cutlass/numeric_conversion.h>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -24,15 +23,9 @@ inline bool check_cuda(cudaError_t status, char const *what)
     return true;
 }
 
-template <class T> __host__ __device__ inline float to_float(T value)
-{
-    return static_cast<float>(value);
-}
+template <class T> __host__ __device__ inline float to_float(T value) { return static_cast<float>(value); }
 
-template <class T> inline T from_float(float value)
-{
-    return T(value);
-}
+template <class T> inline T from_float(float value) { return T(value); }
 
 // 生成小幅度、可重复、不会让 FP8/FP16 轻易溢出的输入值。
 inline float patterned_value(int index)
@@ -48,8 +41,7 @@ template <class Element> void fill_pattern(std::vector<Element> &data)
     }
 }
 
-template <class DstTensor, class SrcTensor>
-__device__ void convert_tensor(DstTensor &&dst, SrcTensor const &src)
+template <class DstTensor, class SrcTensor> __device__ void convert_tensor(DstTensor &&dst, SrcTensor const &src)
 {
     using Dst = typename cute::remove_cvref_t<DstTensor>::value_type;
     using Src = typename cute::remove_cvref_t<SrcTensor>::value_type;
@@ -63,18 +55,18 @@ __device__ void convert_tensor(DstTensor &&dst, SrcTensor const &src)
 // 约定 B 的逻辑形状为 (N,K)，GEMM 计算 C(m,n)=sum_k A(m,k)*B(n,k)。
 // stride 参数以“元素”为单位，和 CuTe make_stride 传入 kernel 的值保持一致。
 template <class ElementA, class ElementB>
-void reference_gemm(int              M,
-                    int              N,
-                    int              K,
-                    ElementA const  *A,
-                    int              stride_am,
-                    int              stride_ak,
-                    ElementB const  *B,
-                    int              stride_bn,
-                    int              stride_bk,
-                    float           *C,
-                    int              stride_cm,
-                    int              stride_cn)
+void reference_gemm(int             M,
+                    int             N,
+                    int             K,
+                    ElementA const *A,
+                    int             stride_am,
+                    int             stride_ak,
+                    ElementB const *B,
+                    int             stride_bn,
+                    int             stride_bk,
+                    float          *C,
+                    int             stride_cm,
+                    int             stride_cn)
 {
     for (int n = 0; n < N; ++n) {
         for (int m = 0; m < M; ++m) {
@@ -106,8 +98,7 @@ float max_abs_diff(int count, LhsElement const *lhs, RhsElement const *rhs)
     return diff;
 }
 
-template <class Element>
-void corrupt_first(std::vector<Element> &data)
+template <class Element> void corrupt_first(std::vector<Element> &data)
 {
     if (!data.empty()) {
         data[0] = from_float<Element>(to_float(data[0]) + 1.0f);
@@ -168,8 +159,7 @@ float time_kernel_ms(Kernel kernel, dim3 grid, dim3 block, size_t smem_bytes, in
     return elapsed_ms / float(iterations);
 }
 
-template <class Launch>
-float time_launch_ms(Launch launch, int iterations)
+template <class Launch> float time_launch_ms(Launch launch, int iterations)
 {
     for (int i = 0; i < 3; ++i) {
         launch();

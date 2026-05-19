@@ -19,11 +19,12 @@ template <typename ArchTag,
           typename GmemStride,
           typename TileShape_MNK,
           int ThreadCount,
-          typename ElementC = Element,
+          typename ElementC  = Element,
           int GmemAlignmentA = 16,
           int GmemAlignmentB = 16,
           int GmemAlignmentC = 16,
-          typename Enable = void>
+          typename ClusterShape_MNK = cute::Shape<cute::_1, cute::_1, cute::_1>,
+          typename Enable    = void>
 struct AutoPartitioner
 {
     static_assert(sizeof(Element) == 0,
