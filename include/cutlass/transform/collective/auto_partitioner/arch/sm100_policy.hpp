@@ -6,6 +6,7 @@
 #include <cstdint>     // 提供精确宽度的整数类型 (int8_t, uint8_t, int32_t 等)
 #include <type_traits> // 编译期类型推导与变换核心库 (std::is_same, std::enable_if_t)
 
+// clang-format off
 // -------------------------------------------------------------------------------------
 // CUTE 原子指令与特征层 (Atom & Traits)
 // CUTE 负责将底层 PTX 汇编指令封装为代数拓扑概念的 Layout 和 Tensor 映射
@@ -37,6 +38,7 @@
 
 #include "../auto_partitioner.hpp" // 引入本项目的泛型前端
 #include "sm80_policy.hpp"         // 引入 SM80 策略作为部分架构退化(Fallback)的备选
+// clang-format on
 
 namespace autopartition {
 namespace detail {
@@ -95,6 +97,61 @@ struct Sm100GmemVectorAlignment : GmemVectorAlignment<Element, ContiguousElement
 {
 };
 
+constexpr int sm100_constexpr_gcd(int lhs, int rhs)
+{
+    lhs = lhs < 0 ? -lhs : lhs;
+    rhs = rhs < 0 ? -rhs : rhs;
+    while (rhs != 0) {
+        int tmp = lhs % rhs;
+        lhs     = rhs;
+        rhs     = tmp;
+    }
+    return lhs;
+}
+
+// Shared-memory row pitch selector for vectorized SIMT/epilogue traffic.
+// It chooses the smallest element padding that keeps each row aligned to the vector width
+// and rotates 128B bank groups with a coprime stride.
+template <class Element, int MajorExtent, int VectorBits = 128, int BankCount = 32, int BankWidthBytes = 4>
+struct Sm100SmemBankPaddingElements
+{
+    static_assert(VectorBits % 8 == 0, "SM100 shared-memory vector width must be byte-addressable.");
+    static_assert(MajorExtent > 0, "SM100 shared-memory major extent must be positive.");
+
+    static constexpr int ElementBytes   = int(sizeof(Element));
+    static constexpr int VectorBytes    = VectorBits / 8;
+    static constexpr int BankSpanBytes  = BankCount * BankWidthBytes;
+    static constexpr int VectorBankSets = BankSpanBytes / VectorBytes;
+
+    static_assert((BankSpanBytes % VectorBytes) == 0,
+                  "SM100 shared-memory vector width must divide the 32-bank span.");
+
+    static constexpr bool is_candidate(int padding_elements)
+    {
+        int pitch_bytes = (MajorExtent + padding_elements) * ElementBytes;
+        if ((pitch_bytes % VectorBytes) != 0) {
+            return false;
+        }
+        int bank_set_stride = (pitch_bytes / VectorBytes) % VectorBankSets;
+        return bank_set_stride != 0 && sm100_constexpr_gcd(bank_set_stride, VectorBankSets) == 1;
+    }
+
+    static constexpr int select_padding_elements()
+    {
+        for (int padding_elements = 0; padding_elements <= BankSpanBytes / ElementBytes; ++padding_elements) {
+            if (is_candidate(padding_elements)) {
+                return padding_elements;
+            }
+        }
+        return -1;
+    }
+
+    static constexpr int value = select_padding_elements();
+    static constexpr int bytes = value * ElementBytes;
+
+    static_assert(value >= 0, "No legal SM100 shared-memory bank padding found for this element and vector width.");
+};
+
 template <int GmemAlignmentBytes> struct Sm100UseTma : std::integral_constant<bool, (GmemAlignmentBytes >= 16)>
 {
 };
@@ -125,9 +182,10 @@ template <class Element, class GmemStride, int TileMN, int TileK, int ThreadCoun
     static constexpr bool IsMnMajor = cutlass::gemm::detail::is_mn_major<GmemStride>();
 
     // [SIMT Shared Memory Bank Conflict 消除策略]
-    // M/N 连续时，直接走 128-bit (16B) 加载，无偏移。
-    // K 连续时，为了在后续寄存器加载时转置，强制加入 2个元素(8B) 的 Padding 将行错开。
-    static constexpr int SmemAlignmentOffset = IsMnMajor ? 0 : 2;
+    // K 连续时，shared 行距由元素大小、TileMN 和 128-bit shared 读写宽度共同决定。
+    static constexpr int SmemVectorAlignmentBits = 128;
+    static constexpr int SmemAlignmentOffset =
+        IsMnMajor ? 0 : Sm100SmemBankPaddingElements<Element, TileMN, SmemVectorAlignmentBits>::value;
     static constexpr int ContiguousDimLength = IsMnMajor ? TileMN : TileK;
 
     // [降级保护] K-major 时，写入 Shared Memory 需要转置，不能用 128-bit 连续异步拷贝，强制退化为 32-bit (1个元素)。
@@ -141,11 +199,9 @@ template <class Element, class GmemStride, int TileMN, int TileK, int ThreadCoun
     using SmemLayout     = SmemLayoutAtom;
 
     // [寄存器读取策略]
-    // M/N 连续支持 128-bit (x4 寄存器) 一次性搬运；K 连续退化为 64-bit (x2 寄存器) 以确保 Bank 不冲突。
+    // Padding 已保证 shared 行距按 128-bit bank-group 旋转，因此两种方向都保持 x4 读写宽度。
     using SmemToRegCopy =
-        cute::conditional_t<IsMnMajor,
-                            cute::Copy_Atom<cute::AutoVectorizingCopyWithAssumedAlignment<128>, Element>,
-                            cute::Copy_Atom<cute::AutoVectorizingCopyWithAssumedAlignment<64>, Element>>;
+        cute::Copy_Atom<cute::AutoVectorizingCopyWithAssumedAlignment<SmemVectorAlignmentBits>, Element>;
     using RegToSmemCopy = SmemToRegCopy;
 
     // Global 到 Shared 依然依赖 SM80 引入的硬件异步指令 (cp.async)
@@ -286,6 +342,7 @@ struct Sm100TensorOpMainloopRole<Element,
         decltype(cutlass::gemm::collective::detail::sm1xx_kernel_input_element_to_mma_input_element<Element>());
     // 决定 Shared Memory 中分配颗粒度 (如果小于 8bit，按照 8bit 对齐分配)
     using SmemAllocElement = cute::conditional_t<(cute::sizeof_bits_v<ElementMma> < 8), uint8_t, ElementMma>;
+    using Accumulator      = typename Sm100TensorOpAccumulator<Element>::type;
 
     // [核心亮点：基于名字和 Tag 的路由]
     // 不再手动编写繁杂的 Swizzle<3,3,3>，而是通过 tag_to_umma_major_A 从 Stride 中提取物理主序。
@@ -294,24 +351,38 @@ struct Sm100TensorOpMainloopRole<Element,
     static constexpr int               BlkM      = cute::size<0>(TileShape_MNK{});
     static constexpr int               BlkK      = cute::size<2>(TileShape_MNK{});
     static constexpr bool              IsMnMajor = cutlass::gemm::detail::is_mn_major<GmemStride>();
+    using TiledMma = decltype(cutlass::gemm::collective::detail::sm100_make_trivial_tiled_mma<
+                              ElementMma,
+                              ElementMma,
+                              Accumulator,
+                              TileShape_MNK,
+                              ClusterShape,
+                              Major,
+                              cutlass::gemm::collective::detail::tag_to_umma_major_B<GmemStride>(),
+                              cutlass::gemm::collective::KernelScheduleAuto>());
 
     // 让硬件和官方 selector 根据 Major Tag 自动推导配合 UMMA 描述符所需的 128B Swizzle Layout
     using SmemLayoutAtom =
         decltype(cutlass::gemm::collective::detail::
                      sm100_smem_selector<Major, SmemAllocElement, cute::Int<BlkM>, cute::Int<BlkK>>());
-    using SmemLayout = decltype(cute::tile_to_shape(SmemLayoutAtom{}, cute::Shape<cute::Int<BlkM>, cute::Int<BlkK>>{}));
+    using MmaShapeA =
+        decltype(cute::partition_shape_A(TiledMma{}, cute::make_shape(cute::Int<BlkM>{}, cute::Int<BlkK>{})));
+    using SmemLayout = decltype(cute::UMMA::tile_to_mma_shape(SmemLayoutAtom{}, MmaShapeA{}));
 
     static constexpr bool UsesTmaLoad = Sm100UseTma<GmemAlignmentBytes>::value;
+    using ClusterLayoutVMNK           = decltype(cute::tiled_divide(cute::make_layout(ClusterShape{}),
+                                                          cute::make_tile(typename TiledMma::AtomThrID{})));
     using GmemTiledCopyTmaOperation =
         decltype(cutlass::gemm::collective::detail::sm90_cluster_shape_to_tma_atom(cute::size<1>(ClusterShape{})));
     using GmemToSmemTmaCopy =
-        decltype(cute::make_tma_copy(GmemTiledCopyTmaOperation{},
-                                     cute::make_tensor(cute::make_gmem_ptr(static_cast<Element *>(nullptr)),
-                                                       cute::make_shape(cute::Int<BlkM>{}, cute::Int<BlkK>{}),
-                                                       GmemStride{}),
-                                     SmemLayout{},
-                                     cute::make_shape(cute::Int<BlkM>{}, cute::Int<BlkK>{}),
-                                     cute::size<1>(ClusterShape{})));
+        decltype(cute::make_tma_atom_A_sm100(GmemTiledCopyTmaOperation{},
+                                             cute::make_tensor(cute::make_gmem_ptr(static_cast<Element *>(nullptr)),
+                                                               cute::make_shape(cute::Int<BlkM>{}, cute::Int<BlkK>{}),
+                                                               GmemStride{}),
+                                             SmemLayout{},
+                                             TileShape_MNK{},
+                                             TiledMma{},
+                                             ClusterLayoutVMNK{}));
 
     // 保留 cp.async 作为后备降级路径 (Fallback)，用于无法满足 TMA 16B 对齐要求时的灾难恢复
     static constexpr int GmemToSmemAlignmentElements =
@@ -362,28 +433,43 @@ struct Sm100TensorOpMainloopRole<Element,
     using ElementMma =
         decltype(cutlass::gemm::collective::detail::sm1xx_kernel_input_element_to_mma_input_element<Element>());
     using SmemAllocElement = cute::conditional_t<(cute::sizeof_bits_v<ElementMma> < 8), uint8_t, ElementMma>;
+    using Accumulator      = typename Sm100TensorOpAccumulator<Element>::type;
 
     static constexpr cute::UMMA::Major Major     = cutlass::gemm::collective::detail::tag_to_umma_major_B<GmemStride>();
     static constexpr int               BlkN      = cute::size<1>(TileShape_MNK{});
     static constexpr int               BlkK      = cute::size<2>(TileShape_MNK{});
     static constexpr bool              IsMnMajor = cutlass::gemm::detail::is_mn_major<GmemStride>();
+    using TiledMma = decltype(cutlass::gemm::collective::detail::sm100_make_trivial_tiled_mma<
+                              ElementMma,
+                              ElementMma,
+                              Accumulator,
+                              TileShape_MNK,
+                              ClusterShape,
+                              cutlass::gemm::collective::detail::tag_to_umma_major_A<GmemStride>(),
+                              Major,
+                              cutlass::gemm::collective::KernelScheduleAuto>());
 
     using SmemLayoutAtom =
         decltype(cutlass::gemm::collective::detail::
                      sm100_smem_selector<Major, SmemAllocElement, cute::Int<BlkN>, cute::Int<BlkK>>());
-    using SmemLayout = decltype(cute::tile_to_shape(SmemLayoutAtom{}, cute::Shape<cute::Int<BlkN>, cute::Int<BlkK>>{}));
+    using MmaShapeB =
+        decltype(cute::partition_shape_B(TiledMma{}, cute::make_shape(cute::Int<BlkN>{}, cute::Int<BlkK>{})));
+    using SmemLayout = decltype(cute::UMMA::tile_to_mma_shape(SmemLayoutAtom{}, MmaShapeB{}));
 
     static constexpr bool UsesTmaLoad = Sm100UseTma<GmemAlignmentBytes>::value;
+    using ClusterLayoutVMNK           = decltype(cute::tiled_divide(cute::make_layout(ClusterShape{}),
+                                                          cute::make_tile(typename TiledMma::AtomThrID{})));
     using GmemTiledCopyTmaOperation =
         decltype(cutlass::gemm::collective::detail::sm90_cluster_shape_to_tma_atom(cute::size<0>(ClusterShape{})));
     using GmemToSmemTmaCopy =
-        decltype(cute::make_tma_copy(GmemTiledCopyTmaOperation{},
-                                     cute::make_tensor(cute::make_gmem_ptr(static_cast<Element *>(nullptr)),
-                                                       cute::make_shape(cute::Int<BlkN>{}, cute::Int<BlkK>{}),
-                                                       GmemStride{}),
-                                     SmemLayout{},
-                                     cute::make_shape(cute::Int<BlkN>{}, cute::Int<BlkK>{}),
-                                     cute::size<0>(ClusterShape{})));
+        decltype(cute::make_tma_atom_B_sm100(GmemTiledCopyTmaOperation{},
+                                             cute::make_tensor(cute::make_gmem_ptr(static_cast<Element *>(nullptr)),
+                                                               cute::make_shape(cute::Int<BlkN>{}, cute::Int<BlkK>{}),
+                                                               GmemStride{}),
+                                             SmemLayout{},
+                                             TileShape_MNK{},
+                                             TiledMma{},
+                                             ClusterLayoutVMNK{}));
 
     static constexpr int GmemToSmemAlignmentElements =
         GmemTiledCopyAlignment<Element, BlkN, BlkK, ThreadCount, IsMnMajor, GmemAlignmentBytes>::value;
@@ -452,8 +538,9 @@ struct Sm100TensorOpRoleC
     using ElementOutput = ElementC;
     using ElementMma =
         decltype(cutlass::gemm::collective::detail::sm1xx_kernel_input_element_to_mma_input_element<Element>());
-    using Accumulator    = typename Sm100TensorOpAccumulator<Element>::type;
-    using ElementCompute = Accumulator;
+    using Accumulator     = typename Sm100TensorOpAccumulator<Element>::type;
+    using ElementCompute  = Accumulator;
+    using EpilogueElement = Accumulator;
 
     using ClusterShape_MNK = ClusterShape;
 
@@ -481,13 +568,23 @@ struct Sm100TensorOpRoleC
     static constexpr int  BlkM      = cute::size<0>(TileShape_MNK{});
     static constexpr int  BlkN      = cute::size<1>(TileShape_MNK{});
     static constexpr bool IsMnMajor = cutlass::gemm::detail::is_mn_major<GmemStride>();
-    static constexpr int  Padding   = SmemPaddingElements<ElementOutput>::value;
+    static constexpr int  SmemMajorExtent = IsMnMajor ? BlkM : BlkN;
+    static constexpr int  Padding         = Sm100SmemBankPaddingElements<EpilogueElement, SmemMajorExtent, 128>::value;
 
     using SmemLayoutAtom = cute::conditional_t<
         IsMnMajor,
         cute::Layout<cute::Shape<cute::Int<BlkM>, cute::Int<BlkN>>, cute::Stride<cute::_1, cute::Int<BlkM + Padding>>>,
         cute::Layout<cute::Shape<cute::Int<BlkM>, cute::Int<BlkN>>, cute::Stride<cute::Int<BlkN + Padding>, cute::_1>>>;
     using SmemLayout = SmemLayoutAtom;
+
+    static constexpr int OutputPadding = Sm100SmemBankPaddingElements<ElementOutput, SmemMajorExtent, 128>::value;
+    using OutputSmemLayoutAtom = cute::conditional_t<
+        IsMnMajor,
+        cute::Layout<cute::Shape<cute::Int<BlkM>, cute::Int<BlkN>>,
+                     cute::Stride<cute::_1, cute::Int<BlkM + OutputPadding>>>,
+        cute::Layout<cute::Shape<cute::Int<BlkM>, cute::Int<BlkN>>,
+                     cute::Stride<cute::Int<BlkN + OutputPadding>, cute::_1>>>;
+    using OutputSmemLayout = OutputSmemLayoutAtom;
 
     static constexpr bool UsesTmaLoad  = Sm100UseTma<GmemAlignmentBytes>::value;
     static constexpr bool UsesTmaStore = Sm100UseTma<GmemAlignmentBytes>::value;
@@ -504,7 +601,7 @@ struct Sm100TensorOpRoleC
                                      cute::make_tensor(cute::make_gmem_ptr(static_cast<ElementOutput *>(nullptr)),
                                                        cute::make_shape(cute::Int<BlkM>{}, cute::Int<BlkN>{}),
                                                        GmemStride{}),
-                                     SmemLayout{},
+                                     OutputSmemLayout{},
                                      cute::make_shape(cute::Int<BlkM>{}, cute::Int<BlkN>{}),
                                      cute::Int<1>{}));
     using GmemToSmemCpAsyncCopy =
@@ -521,14 +618,16 @@ struct Sm100TensorOpRoleC
         cute::conditional_t<(BlkM == 64), cute::SM100_TMEM_STORE_16dp256b1x, cute::SM100_TMEM_STORE_32dp32b32x>;
     using TmemToSmemCopy = cute::Copy_Atom<TmemToSmemCopyOperation, Accumulator>;
 
-    using SmemToRegCopy = void;
-    using RegToSmemCopy = void;
+    using SmemToRegCopyOperation = cute::AutoVectorizingCopyWithAssumedAlignment<128>;
+    using RegToSmemCopyOperation = cute::AutoVectorizingCopyWithAssumedAlignment<128>;
+    using SmemToRegCopy          = cute::Copy_Atom<SmemToRegCopyOperation, EpilogueElement>;
+    using RegToSmemCopy          = cute::Copy_Atom<RegToSmemCopyOperation, ElementOutput>;
     using SmemToGmemTmaCopy =
         decltype(cute::make_tma_copy(cute::SM90_TMA_STORE{},
                                      cute::make_tensor(cute::make_gmem_ptr(static_cast<ElementOutput *>(nullptr)),
                                                        cute::make_shape(cute::Int<BlkM>{}, cute::Int<BlkN>{}),
                                                        GmemStride{}),
-                                     SmemLayout{},
+                                     OutputSmemLayout{},
                                      cute::make_shape(cute::Int<BlkM>{}, cute::Int<BlkN>{}),
                                      cute::Int<1>{}));
     using SmemToGmemVectorCopy = decltype(cutlass::gemm::collective::detail::make_simt_gmem_tiled_copy<
@@ -545,6 +644,9 @@ struct Sm100TensorOpRoleC
     using SharedToRegisterCopy     = SmemToRegCopy;
     using RegisterToSharedCopy     = RegToSmemCopy;
     using SharedToGlobalCopy       = SmemToGmemCopy;
+    using SharedToRegisterLayout   = SmemLayout;
+    using RegisterToSharedLayout   = OutputSmemLayout;
+    using SharedToGlobalLayout     = OutputSmemLayout;
 };
 
 // =====================================================================================
@@ -563,8 +665,8 @@ struct Sm120TensorOpMainloopRole
     // [极低精度量化屏障]
     static_assert(IsSm120TensorOpElement<Element>::value, "SM120 TensorOp example path currently targets FP8 inputs.");
 
-    using ElementInput      = Element;
-    using ClusterShape_MNK  = ClusterShape;
+    using ElementInput                            = Element;
+    using ClusterShape_MNK                        = ClusterShape;
     static constexpr int GmemToSmemAlignmentBytes = GmemAlignmentBytes;
 
     using ElementMma =
@@ -608,15 +710,31 @@ struct Sm120TensorOpMainloopRole
     using SmemElement = SmemAllocElement; // 对外暴漏分配类型，用于上层 Scale/Bias 的共享内存分配计算
 };
 
-template <class Element, class GmemStride, class TileShape_MNK, int ThreadCount, int GmemAlignmentBytes, class ClusterShape>
+template <class Element,
+          class GmemStride,
+          class TileShape_MNK,
+          int ThreadCount,
+          int GmemAlignmentBytes,
+          class ClusterShape>
 struct Sm120TensorOpRoleA
     : Sm120TensorOpMainloopRole<Element, GmemStride, TileShape_MNK, ThreadCount, GmemAlignmentBytes, ClusterShape, true>
 {
 };
 
-template <class Element, class GmemStride, class TileShape_MNK, int ThreadCount, int GmemAlignmentBytes, class ClusterShape>
+template <class Element,
+          class GmemStride,
+          class TileShape_MNK,
+          int ThreadCount,
+          int GmemAlignmentBytes,
+          class ClusterShape>
 struct Sm120TensorOpRoleB
-    : Sm120TensorOpMainloopRole<Element, GmemStride, TileShape_MNK, ThreadCount, GmemAlignmentBytes, ClusterShape, false>
+    : Sm120TensorOpMainloopRole<Element,
+                                GmemStride,
+                                TileShape_MNK,
+                                ThreadCount,
+                                GmemAlignmentBytes,
+                                ClusterShape,
+                                false>
 {
 };
 
@@ -631,9 +749,9 @@ struct Sm120TensorOpRoleC
 {
     static_assert(IsSm120TensorOpElement<Element>::value, "SM120 TensorOp path currently targets FP8 inputs.");
 
-    using ElementInput      = Element;
-    using ElementOutput     = ElementC;
-    using ClusterShape_MNK  = ClusterShape;
+    using ElementInput     = Element;
+    using ElementOutput    = ElementC;
+    using ClusterShape_MNK = ClusterShape;
     using Accumulator     = float; // 哪怕是 FP8，累加依然需要使用全精度的 FP32 以保持数值稳定性
     using ElementCompute  = Accumulator;
     using EpilogueElement = Accumulator;

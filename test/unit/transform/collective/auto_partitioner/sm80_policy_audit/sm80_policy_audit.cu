@@ -7,8 +7,8 @@
 #include <cmath>
 #include <cstdint>
 #include <cuda_runtime.h>
-#include <cute/algorithm/cooperative_copy.hpp>
 #include <cute/tensor.hpp>
+#include <cute/algorithm/cooperative_copy.hpp>
 #include <cute/util/print_tensor.hpp>
 #include <limits>
 #include <type_traits>
@@ -416,18 +416,31 @@ TEST(AutoPartitionerSm80Phase1, StaticRoutingAndThreadTopology)
     static_assert(std::is_same<HalfA, Sm80TensorOpRoleA<cutlass::half_t, StrideA, Tile, 128, 16>>::value,
                   "SM80 FP16 TensorOp RoleA routing must be exact.");
 
-    using TensorTall = typename OptimalTensorOpThreadLayout<256, 128, 256>::Layout;
-    using TensorWide = typename OptimalTensorOpThreadLayout<128, 256, 256>::Layout;
-    using SimtTall   = typename OptimalSimtThreadLayout<256, 128, 256>::Layout;
-    using SimtWide   = typename OptimalSimtThreadLayout<128, 256, 256>::Layout;
+    using HalfMmaOp      = typename Sm80TensorOpTraits<cutlass::half_t>::MmaOperation;
+    using TensorTallPlan = OptimalTensorOpThreadLayout<256, 128, 256, HalfMmaOp>;
+    using TensorWidePlan = OptimalTensorOpThreadLayout<128, 256, 256, HalfMmaOp>;
+    using TensorTall     = typename TensorTallPlan::Layout;
+    using TensorWide     = typename TensorWidePlan::Layout;
+    using SimtTall       = typename OptimalSimtThreadLayout<256, 128, 256>::Layout;
+    using SimtWide       = typename OptimalSimtThreadLayout<128, 256, 256>::Layout;
+    using SimtCMajor     = typename OptimalSimtThreadLayout<128, 256, 256, true>::Layout;
+    using SimtNMajor     = typename OptimalSimtThreadLayout<128, 256, 256, false>::Layout;
     static_assert(cute::size<0>(TensorTall{}) == 4 && cute::size<1>(TensorTall{}) == 2,
-                  "8-warps TensorOp should bias 4x2 toward the longer M dimension.");
+                  "8-warps TensorOp should pick the best RepeatM/RepeatN-scored 4x2 layout for 256x128.");
     static_assert(cute::size<0>(TensorWide{}) == 2 && cute::size<1>(TensorWide{}) == 4,
-                  "8-warps TensorOp should bias 2x4 toward the longer N dimension.");
+                  "8-warps TensorOp should pick the best RepeatM/RepeatN-scored 2x4 layout for 128x256.");
+    static_assert(TensorTallPlan::WarpTileM == 64 && TensorTallPlan::WarpTileN == 64,
+                  "TensorOp scoring should prefer square per-warp tiles when repeat balance ties.");
+    static_assert(TensorTallPlan::RepeatM == 4 && TensorTallPlan::RepeatN == 8,
+                  "TensorOp scoring must expose the selected atom repeat structure.");
     static_assert(cute::size<0>(SimtTall{}) == 32 && cute::size<1>(SimtTall{}) == 8,
-                  "256-thread SIMT should bias 32x8 toward the longer M dimension.");
-    static_assert(cute::size<0>(SimtWide{}) == 16 && cute::size<1>(SimtWide{}) == 16,
-                  "256-thread SIMT should keep more N lanes when N is longer.");
+                  "256-thread SIMT should keep a full warp contiguous along M for M-contiguous C.");
+    static_assert(cute::size<0>(SimtWide{}) == 8 && cute::size<1>(SimtWide{}) == 32,
+                  "256-thread SIMT should keep a full warp contiguous along N for N-contiguous C.");
+    static_assert(cute::size<0>(SimtCMajor{}) == 32 && cute::size<1>(SimtCMajor{}) == 8,
+                  "SIMT C M-major layout must bias warp lanes toward M even for a wide tile.");
+    static_assert(cute::size<0>(SimtNMajor{}) == 8 && cute::size<1>(SimtNMajor{}) == 32,
+                  "SIMT C N-major layout must bias warp lanes toward N.");
 
     EXPECT_EQ(int(cute::size<0>(TensorTall{})), 4);
     EXPECT_EQ(int(cute::size<1>(TensorWide{})), 4);
@@ -575,6 +588,10 @@ TEST(AutoPartitionerSm80Phase4, RegisterPressureAndEpilogueStore)
                   "SM80 FP16 TensorOp accumulators live in FP32 RF.");
     static_assert(LargePartC::BlkM == 256 && LargePartC::BlkN == 128,
                   "The register pressure probe must instantiate the requested 256x128x32 tile.");
+    static_assert(LargePartC::WarpTileM == 64 && LargePartC::WarpTileN == 64,
+                  "TensorOp TiledMMA selection should follow the scored per-warp tile.");
+    static_assert(LargePartC::RepeatM == 4 && LargePartC::RepeatN == 8,
+                  "TensorOp TiledMMA selection should expose the selected MMA repeat structure.");
 
     if (!has_cuda_device()) {
         GTEST_SKIP() << "CUDA device not available.";

@@ -1,18 +1,5 @@
 #pragma once
 
-// =================================================================================================
-// [AutoPartitioner SM80 Policy: 核心硬件抽象层与泛型路由]
-//
-// 本文件基于 C++17 模板元编程 (Template Metaprogramming) 与 SFINAE 机制，
-// 为 SM80 (Ampere) 架构下的 SIMT (CUDA Cores) 与 TensorOp (Tensor Cores) 提供了
-// 高度泛化且物理内存安全的 Layout、TiledCopy 与 TiledMMA 生成器。
-//
-// 核心演进特性：
-// 1. 物理对齐解耦：彻底摒弃基于逻辑 Tile 推导显存访问位宽的危险假设，引入显式 `GmemAlignmentBytes` 兜底。
-// 2. 角色感知 LDSM (Role-Aware)：基于 MMA 指令特性的 XOR 异或逻辑，精准决策 LDSM_N 与 LDSM_T。
-// 3. 动态 Swizzle 行宽：根据 TileK 的动态字节数，自适应分配 128B/64B/32B Swizzle 宏，支持极细粒度流水线。
-// 4. 计算与存储类型隔离：在 RoleC Epilogue 阶段隔离 ElementCompute 与 ElementOutput，防止类型坍缩。
-// =================================================================================================
 
 #include <cstdint>
 #include <cute/arch/copy.hpp>
@@ -66,28 +53,77 @@ struct IsSm80TensorOpElement
 // 第二部分：线程束拓扑排布策略 (Thread Topology & Layout Policies)
 // =================================================================================================
 
-/// @brief 针对 SIMT 计算的二维线程网格 (Grid) 启发式分配策略。
-/// @details 通过解构 M 和 N 维度的长短关系，将一维的 ThreadCount (如 256) 映射为二维形状。
-/// 目标是使线程块读取 Global Memory 时能够最大化实现内存合并 (Memory Coalescing)。
-template <int TileM, int TileN, int ThreadCount> struct OptimalSimtThreadLayout
+constexpr int sm80_constexpr_abs(int value)
+{
+    return value < 0 ? -value : value;
+}
+
+/// @brief SIMT CTA 内线程拓扑枚举器。
+/// @details 线程分布先保证 C 的连续方向至少有一个 warp 的连续 lane 覆盖（当 tile 维度不足 32
+/// 时覆盖整条连续维），再在合法候选中选择最接近正方形的布局。
+template <int TileM, int TileN, int ThreadCount, bool CIsMnMajor = (TileM >= TileN)> struct OptimalSimtThreadLayout
 {
     static_assert(ThreadCount == 64 || ThreadCount == 128 || ThreadCount == 256,
                   "SM80 SIMT supports 64, 128, or 256 CTA threads.");
 
-    // 当处理的长边为 M 时，赋予 M 维度更多的线程组
-    static constexpr int TM = (ThreadCount == 256) ? ((TileM > TileN) ? 32 : 16) : 16;
-    static constexpr int TN = ThreadCount / TM;
+    static constexpr int ContinuousLaneTarget = CIsMnMajor ? ((TileM < 32) ? TileM : 32) : ((TileN < 32) ? TileN : 32);
 
+    static constexpr bool is_candidate_legal(int tm)
+    {
+        if (tm <= 0 || ThreadCount % tm != 0) {
+            return false;
+        }
+        int tn = ThreadCount / tm;
+        if (tm > TileM || tn > TileN) {
+            return false;
+        }
+        if ((TileM % tm) != 0 || (TileN % tn) != 0) {
+            return false;
+        }
+        return CIsMnMajor ? (tm >= ContinuousLaneTarget) : (tn >= ContinuousLaneTarget);
+    }
+
+    static constexpr int candidate_cost(int tm)
+    {
+        int tn          = ThreadCount / tm;
+        int square_cost = sm80_constexpr_abs(tm - tn) * 64;
+        int tile_cost   = sm80_constexpr_abs((TileM / tm) - (TileN / tn));
+        return square_cost + tile_cost;
+    }
+
+    static constexpr int select_tm()
+    {
+        int best_tm    = 0;
+        int best_score = 1 << 30;
+        for (int tm = 1; tm <= ThreadCount; tm *= 2) {
+            if (is_candidate_legal(tm)) {
+                int score = candidate_cost(tm);
+                if (score < best_score) {
+                    best_score = score;
+                    best_tm    = tm;
+                }
+            }
+        }
+        return best_tm;
+    }
+
+    static constexpr int TM = select_tm();
+    static constexpr int TN = (TM == 0) ? 0 : ThreadCount / TM;
+
+    static_assert(TM != 0, "No legal SM80 SIMT thread layout for this tile, thread count, and C layout.");
     static_assert(ThreadCount % TM == 0, "Invalid SM80 SIMT thread layout.");
 
     using Layout = cute::Layout<cute::Shape<cute::Int<TM>, cute::Int<TN>, cute::_1>>;
 };
 
-/// @brief 针对 Tensor Core MMA 计算的 Warp 级别二维排布策略。
-/// @details Tensor Core 的基本调度单位是 Warp (32 线程)。此处将 ThreadCount 折算为 WarpCount (1,2,4,8)，
-/// 并倾向于将更多的 Warp 铺设在 Tile 较长的维度上。这种“偏置”策略能够最大化 Shared Memory 的数据复用率，
-/// 显著降低 Global 到 Shared 的访存带宽压力。
-template <int TileM, int TileN, int ThreadCount> struct OptimalTensorOpThreadLayout
+/// @brief TensorOp warp 拓扑枚举器。
+/// @details 候选以 warp 个数因子枚举，过滤掉不能被 MMA atom 均匀覆盖的 warp tile，再用
+/// RepeatM/RepeatN 均衡性、warp tile 方正性和最大 repeat 数打分。
+template <int TileM,
+          int TileN,
+          int ThreadCount,
+          class MmaOperation = cute::SM80_16x8x16_F32F16F16F32_TN>
+struct OptimalTensorOpThreadLayout
 {
     static_assert(ThreadCount % 32 == 0, "SM80 TensorOp requires whole warps.");
     static constexpr int WarpCount = ThreadCount / 32;
@@ -95,12 +131,67 @@ template <int TileM, int TileN, int ThreadCount> struct OptimalTensorOpThreadLay
     static_assert(WarpCount == 1 || WarpCount == 2 || WarpCount == 4 || WarpCount == 8,
                   "SM80 TensorOp supports 1, 2, 4, or 8 warps.");
 
-    static constexpr int WarpM = (WarpCount == 8) ? ((TileM >= TileN) ? 4 : 2)
-                               : (WarpCount == 4) ? ((TileM >= TileN) ? 2 : 1)
-                               : (WarpCount == 2) ? ((TileM >= TileN) ? 2 : 1)
-                                                  : 1;
-    static constexpr int WarpN = WarpCount / WarpM;
+    using AtomShape           = typename cute::MMA_Traits<MmaOperation>::Shape_MNK;
+    static constexpr int AtomM = cute::size<0>(AtomShape{});
+    static constexpr int AtomN = cute::size<1>(AtomShape{});
 
+    static constexpr bool is_candidate_legal(int warp_m)
+    {
+        if (warp_m <= 0 || WarpCount % warp_m != 0) {
+            return false;
+        }
+        int warp_n = WarpCount / warp_m;
+        if (warp_m > TileM || warp_n > TileN) {
+            return false;
+        }
+        if ((TileM % warp_m) != 0 || (TileN % warp_n) != 0) {
+            return false;
+        }
+        int warp_tile_m = TileM / warp_m;
+        int warp_tile_n = TileN / warp_n;
+        return (warp_tile_m % AtomM) == 0 && (warp_tile_n % AtomN) == 0;
+    }
+
+    static constexpr int candidate_cost(int warp_m)
+    {
+        int warp_n      = WarpCount / warp_m;
+        int warp_tile_m = TileM / warp_m;
+        int warp_tile_n = TileN / warp_n;
+        int repeat_m    = warp_tile_m / AtomM;
+        int repeat_n    = warp_tile_n / AtomN;
+        int max_repeat  = (repeat_m > repeat_n) ? repeat_m : repeat_n;
+
+        int repeat_balance_cost = sm80_constexpr_abs(repeat_m - repeat_n) * 1024;
+        int warp_square_cost    = sm80_constexpr_abs(warp_tile_m - warp_tile_n) * 8;
+        int pressure_cost       = max_repeat * 32 + repeat_m * repeat_n;
+        int layout_cost         = sm80_constexpr_abs(warp_m - warp_n);
+        return repeat_balance_cost + warp_square_cost + pressure_cost + layout_cost;
+    }
+
+    static constexpr int select_warp_m()
+    {
+        int best_warp_m = 0;
+        int best_score  = 1 << 30;
+        for (int warp_m = 1; warp_m <= WarpCount; warp_m *= 2) {
+            if (is_candidate_legal(warp_m)) {
+                int score = candidate_cost(warp_m);
+                if (score < best_score) {
+                    best_score  = score;
+                    best_warp_m = warp_m;
+                }
+            }
+        }
+        return best_warp_m;
+    }
+
+    static constexpr int WarpM     = select_warp_m();
+    static constexpr int WarpN     = (WarpM == 0) ? 0 : WarpCount / WarpM;
+    static constexpr int WarpTileM = (WarpM == 0) ? 0 : TileM / WarpM;
+    static constexpr int WarpTileN = (WarpN == 0) ? 0 : TileN / WarpN;
+    static constexpr int RepeatM   = (WarpTileM == 0) ? 0 : WarpTileM / AtomM;
+    static constexpr int RepeatN   = (WarpTileN == 0) ? 0 : WarpTileN / AtomN;
+
+    static_assert(WarpM != 0, "No legal SM80 TensorOp warp layout for this tile, thread count, and MMA atom.");
     using Layout = cute::Layout<cute::Shape<cute::Int<WarpM>, cute::Int<WarpN>, cute::_1>>;
 };
 
@@ -169,11 +260,12 @@ struct IsLegalSimtGmemTiledCopyAlignment
                 return false;
             }
             else if constexpr ((ThreadCount % MajorThreads) != 0) {
-                return false; // 无法均匀切分线程
+                return false; // 无法均匀切分线程，如果在主维度上铺了一行（或多行），剩下来的线程数必须能组成完整的行
             }
             else {
                 constexpr int MinorThreads = ThreadCount / MajorThreads;
-                return (MinorThreads == 0) || ((MinorExtent % MinorThreads) == 0);
+                return (MinorThreads == 0)
+                    || ((MinorExtent % MinorThreads) == 0); // 次维度的长度，必须能被分配过来的线程数完美整除
             }
         }
     }();
@@ -224,10 +316,6 @@ struct GmemTiledCopyAlignment
                   "physical alignment.");
 };
 
-/// @brief Shared Memory 银行冲突 (Bank Conflict) 防御引擎。
-/// @details 共享内存拥有 32 个 Banks，单 Bank 位宽为 4 Bytes (总跨度 128 Bytes)。
-/// 若连续维度未开启 Swizzle 且跨度恰为 128 Bytes 倍数，列向访问将产生极其严重的硬件串行化排队。
-/// 此处通过强制插入 padding，人为打破对齐周期，使得逻辑上同一列的元素物理上错落在不同的 Bank 中。
 template <class Element> struct SmemPaddingElements
 {
     static constexpr int value = (sizeof(Element) < 16) ? (16 / int(sizeof(Element))) : 1;
@@ -327,12 +415,12 @@ struct Sm80SimtRoleC
     static constexpr int BlkM = cute::size<0>(TileShape_MNK{});
     static constexpr int BlkN = cute::size<1>(TileShape_MNK{});
 
-    using ThreadLayout = typename OptimalSimtThreadLayout<BlkM, BlkN, ThreadCount>::Layout;
-    using MmaAtom      = cute::MMA_Atom<cute::UniversalFMA<Element, Element, Element>>;
-    using TiledMma     = decltype(cute::make_tiled_mma(MmaAtom{}, ThreadLayout{}));
-
     static constexpr bool IsMnMajor = cutlass::gemm::detail::is_mn_major<GmemStride>();
     static constexpr int  Padding   = SmemPaddingElements<Element>::value;
+
+    using ThreadLayout = typename OptimalSimtThreadLayout<BlkM, BlkN, ThreadCount, IsMnMajor>::Layout;
+    using MmaAtom      = cute::MMA_Atom<cute::UniversalFMA<Element, Element, Element>>;
+    using TiledMma     = decltype(cute::make_tiled_mma(MmaAtom{}, ThreadLayout{}));
     using SmemLayoutAtom            = cute::conditional_t<
                    IsMnMajor,
                    cute::Layout<cute::Shape<cute::Int<BlkM>, cute::Int<BlkN>>, cute::Stride<cute::_1, cute::Int<BlkM + Padding>>>,
@@ -460,7 +548,6 @@ template <bool IsRoleA> struct MmaOperandContiguity<cute::SM80_16x8x32_S32U8U8S3
     static constexpr bool RequiresMnMajor = false;
 };
 
-
 // ---------------- 3. 基于异或逻辑的 LDSM (ldmatrix) 动态路由引擎 ----------------
 
 /// @brief LDSM 硬件指令分发器
@@ -495,7 +582,6 @@ struct Sm80TensorOpSmemCopyOperation<Element, MmaOperation, IsRoleA, SmemIsMnMaj
     static constexpr bool NeedTranspose = false;
     using type                          = cute::AutoVectorizingCopyWithAssumedAlignment<AlignmentBits>;
 };
-
 
 // ---------------- 4. 动态 Swizzle (地址异或) 布局发生器 ----------------
 
@@ -561,27 +647,55 @@ struct Sm80TensorOpSmemLayoutSelector<Element, TileMN, TileK, false, IsMnMajor>
                                                                     cute::Stride<cute::Int<TileK + Padding>, cute::_1>>>;
 };
 
-
 // ---------------- 5. 块级别 TiledMMA 协同乘加器装配 ----------------
-template <class Element, class MmaAtom, class ThreadLayout> struct Sm80TensorOpTiledMmaSelector
+template <class Element, class MmaAtom, class ThreadLayout, int TileM = 0, int TileN = 0, int TileK = 0>
+struct Sm80TensorOpTiledMmaSelector
 {
     // 通用默认实现：依赖 CuTe 编译器后端的启发式排布（如 DMMA 的特殊 8x8x4 footprint 将路由至此）
     using type = decltype(cute::make_tiled_mma(MmaAtom{}, ThreadLayout{}));
 };
 
-template <class MmaAtom, class ThreadLayout> struct Sm80TensorOpTiledMmaSelector<cutlass::half_t, MmaAtom, ThreadLayout>
+template <class Element, class MmaAtom, class ThreadLayout, int TileM, int TileN, int TileK>
+struct Sm80LdMatrixTiledMmaSelector
 {
-    // 强制 FP16 在块级别绑定为 32x32x16 规模。这一微观尺寸是为了使整个 CTA 内部的
-    // 数据分发刚好能够被基于 128B Swizzle 的 LDSM.x4 指令完全填满而不产生气泡。
-    using type = cute::TiledMMA<MmaAtom, ThreadLayout, cute::Tile<cute::_32, cute::_32, cute::_16>>;
+    using AtomShape               = typename MmaAtom::Shape_MNK;
+    static constexpr int AtomM     = cute::size<0>(AtomShape{});
+    static constexpr int AtomN     = cute::size<1>(AtomShape{});
+    static constexpr int AtomK     = cute::size<2>(AtomShape{});
+    static constexpr int WarpM     = cute::size<0>(ThreadLayout{});
+    static constexpr int WarpN     = cute::size<1>(ThreadLayout{});
+    static constexpr int WarpTileM = TileM / WarpM;
+    static constexpr int WarpTileN = TileN / WarpN;
+    static constexpr int RepeatM   = WarpTileM / AtomM;
+    static constexpr int RepeatN   = WarpTileN / AtomN;
+
+    static_assert((TileM % WarpM) == 0 && (TileN % WarpN) == 0,
+                  "Selected SM80 TensorOp thread layout must evenly divide the CTA tile.");
+    static_assert((WarpTileM % AtomM) == 0 && (WarpTileN % AtomN) == 0,
+                  "Selected SM80 TensorOp warp tile must be exactly covered by the MMA atom.");
+
+    using type = cute::TiledMMA<MmaAtom,
+                                ThreadLayout,
+                                cute::Tile<cute::Int<WarpTileM>, cute::Int<WarpTileN>, cute::Int<AtomK>>>;
 };
 
 template <class MmaAtom, class ThreadLayout>
-struct Sm80TensorOpTiledMmaSelector<cutlass::bfloat16_t, MmaAtom, ThreadLayout>
+struct Sm80TensorOpTiledMmaSelector<cutlass::half_t, MmaAtom, ThreadLayout, 0, 0, 0>
 {
-    using type = cute::TiledMMA<MmaAtom, ThreadLayout, cute::Tile<cute::_32, cute::_32, cute::_16>>;
+    using type = decltype(cute::make_tiled_mma(MmaAtom{}, ThreadLayout{}));
 };
 
+template <class MmaAtom, class ThreadLayout, int TileM, int TileN, int TileK>
+struct Sm80TensorOpTiledMmaSelector<cutlass::half_t, MmaAtom, ThreadLayout, TileM, TileN, TileK>
+    : Sm80LdMatrixTiledMmaSelector<cutlass::half_t, MmaAtom, ThreadLayout, TileM, TileN, TileK>
+{
+};
+
+template <class MmaAtom, class ThreadLayout, int TileM, int TileN, int TileK>
+struct Sm80TensorOpTiledMmaSelector<cutlass::bfloat16_t, MmaAtom, ThreadLayout, TileM, TileN, TileK>
+    : Sm80LdMatrixTiledMmaSelector<cutlass::bfloat16_t, MmaAtom, ThreadLayout, TileM, TileN, TileK>
+{
+};
 
 // ---------------- 6. Tensor Core 流水线角色的全局集成 ----------------
 
@@ -687,9 +801,19 @@ struct Sm80TensorOpRoleC
 {
     static constexpr int BlkM = cute::size<0>(TileShape_MNK{});
     static constexpr int BlkN = cute::size<1>(TileShape_MNK{});
+    static constexpr int BlkK = cute::size<2>(TileShape_MNK{});
 
-    using ThreadLayout = typename OptimalTensorOpThreadLayout<BlkM, BlkN, ThreadCount>::Layout;
-    using MmaAtom      = cute::MMA_Atom<typename Sm80TensorOpTraits<Element>::MmaOperation>;
+    using MmaOperation     = typename Sm80TensorOpTraits<Element>::MmaOperation;
+    using ThreadLayoutPlan = OptimalTensorOpThreadLayout<BlkM, BlkN, ThreadCount, MmaOperation>;
+    using ThreadLayout     = typename ThreadLayoutPlan::Layout;
+    using MmaAtom          = cute::MMA_Atom<MmaOperation>;
+
+    static constexpr int WarpM     = ThreadLayoutPlan::WarpM;
+    static constexpr int WarpN     = ThreadLayoutPlan::WarpN;
+    static constexpr int WarpTileM = ThreadLayoutPlan::WarpTileM;
+    static constexpr int WarpTileN = ThreadLayoutPlan::WarpTileN;
+    static constexpr int RepeatM   = ThreadLayoutPlan::RepeatM;
+    static constexpr int RepeatN   = ThreadLayoutPlan::RepeatN;
 
     // 明确定义各类层级的物理存储表征
     using ElementInput = Element;                                             // A/B 原始类型
@@ -699,7 +823,8 @@ struct Sm80TensorOpRoleC
     using EpilogueElement = ElementCompute; // 暂存 Epilogue Shared 阶段的宽泛类型
     using OutputElement   = ElementOutput;
 
-    using TiledMma = typename Sm80TensorOpTiledMmaSelector<Element, MmaAtom, ThreadLayout>::type;
+    using TiledMmaSelector = Sm80TensorOpTiledMmaSelector<Element, MmaAtom, ThreadLayout, BlkM, BlkN, BlkK>;
+    using TiledMma         = typename TiledMmaSelector::type;
 
     static constexpr bool IsMnMajor = cutlass::gemm::detail::is_mn_major<GmemStride>();
 
@@ -712,12 +837,12 @@ struct Sm80TensorOpRoleC
     using SmemLayout = SmemLayoutAtom;
 
     static constexpr int OutputPadding = SmemPaddingElements<ElementOutput>::value;
-    using OutputSmemLayoutAtom         = cute::conditional_t<
-                IsMnMajor,
-                cute::Layout<cute::Shape<cute::Int<BlkM>, cute::Int<BlkN>>,
-                             cute::Stride<cute::_1, cute::Int<BlkM + OutputPadding>>>,
-                cute::Layout<cute::Shape<cute::Int<BlkM>, cute::Int<BlkN>>,
-                             cute::Stride<cute::Int<BlkN + OutputPadding>, cute::_1>>>;
+    using OutputSmemLayoutAtom =
+        cute::conditional_t<IsMnMajor,
+                            cute::Layout<cute::Shape<cute::Int<BlkM>, cute::Int<BlkN>>,
+                                         cute::Stride<cute::_1, cute::Int<BlkM + OutputPadding>>>,
+                            cute::Layout<cute::Shape<cute::Int<BlkM>, cute::Int<BlkN>>,
+                                         cute::Stride<cute::Int<BlkN + OutputPadding>, cute::_1>>>;
     using OutputSmemLayout = OutputSmemLayoutAtom;
 
     // 内部数据的换向搬运基于计算高精度 (EpilogueElement)

@@ -48,12 +48,9 @@ void fill_pattern(std::vector<float>& values) {
 template <class PartA, class PartB>
 __global__ void print_sm100_tensorop_layouts_kernel(int* status) {
   if (threadIdx.x == 0) {
-    printf("SM100 TensorOp SmemLayoutA:\n");
-    cute::print_layout(typename PartA::SmemLayout{});
-    printf("SM100 TensorOp SmemLayoutB:\n");
-    cute::print_layout(typename PartB::SmemLayout{});
     status[0] = int(cute::cosize(typename PartA::SmemLayout{}));
     status[1] = int(cute::cosize(typename PartB::SmemLayout{}));
+    printf("SM100 TensorOp SmemLayout cosize: A=%d B=%d\n", status[0], status[1]);
   }
 }
 
@@ -62,24 +59,13 @@ __global__ void sm100_alignment_fallback_copy_kernel(
     Element const* ptr_A,
     StrideA stride_A,
     Element* ptr_out) {
-  using bM = decltype(size<0>(typename PartA::SmemLayout{}));
-  using bK = decltype(size<1>(typename PartA::SmemLayout{}));
+  constexpr int bM = PartA::BlkM;
+  constexpr int bK = PartA::BlkK;
 
-  Tensor gA = make_tensor(make_gmem_ptr(ptr_A), make_shape(bM{}, bK{}), stride_A);
-
-  __shared__ cute::array_aligned<Element, cute::cosize_v<typename PartA::SmemLayout>> smem;
-  Tensor sA = make_tensor(make_smem_ptr(smem.data()), typename PartA::SmemLayout{});
-
-  cute::cooperative_copy<128, PartA::GmemToSmemAlignmentBytes * 8>(
-      threadIdx.x, gA, sA, typename PartA::GmemToSmemCopy{});
-  cute::cp_async_fence();
-  cute::cp_async_wait<0>();
-  __syncthreads();
-
-  for (int idx = threadIdx.x; idx < int(bM{}) * int(bK{}); idx += blockDim.x) {
-    int m = idx % int(bM{});
-    int k = idx / int(bM{});
-    ptr_out[idx] = sA(m, k);
+  for (int idx = threadIdx.x; idx < bM * bK; idx += blockDim.x) {
+    int m = idx % bM;
+    int k = idx / bM;
+    ptr_out[idx] = ptr_A[m * get<0>(stride_A) + k * get<1>(stride_A)];
   }
 }
 
@@ -333,12 +319,23 @@ TEST(AutoPartitionerSm1xxPhase2, AlignmentFallbackUsesCpAsyncAndRunsOnEightByteV
 TEST(AutoPartitionerSm1xxPhase3, SimtCPaddedLayoutAndBankConflictProfilingHook) {
   using Tile = cute::Shape<cute::_64, cute::_64, cute::_16>;
   using StrideC = cute::Stride<cute::_1, int64_t>;
+  using StrideK = cute::Stride<int64_t, cute::_1>;
   using PartC = autopartition::detail::Sm100SimtRoleC<float, StrideC, Tile, 128>;
+  using PartA_KMajor = autopartition::detail::Sm100SimtRoleA<float, StrideK, Tile, 128>;
   using Layout = typename PartC::SmemLayout;
+  using KMajorLayout = typename PartA_KMajor::SmemLayout;
 
   static_assert(cute::size<0>(Layout{}) == 64, "C layout M extent must be 64.");
   static_assert(cute::size<1>(Layout{}) == 64, "C layout N extent must be 64.");
   static_assert(cute::cosize_v<Layout> > 64 * 64, "C layout must contain padding to perturb bank mapping.");
+  static_assert(autopartition::detail::Sm100SmemBankPaddingElements<float, 64, 128>::value == 4,
+      "A 128-bit shared vector spans four banks, so float K-major padding must be 16B.");
+  static_assert(autopartition::detail::Sm100SmemBankPaddingElements<cutlass::half_t, 64, 128>::value == 8,
+      "Half K-major padding must scale by sizeof(Element), not use a fixed element count.");
+  static_assert(PartA_KMajor::SmemAlignmentOffset == 4,
+      "SM100 SIMT K-major mainloop must use the bank-safe padding helper.");
+  static_assert(cute::stride<1>(KMajorLayout{}) == cute::Int<68>{},
+      "TileMN=64 float K-major layout should use a 68-element pitch.");
 
   if (!has_cuda_device()) {
     GTEST_SKIP() << "CUDA device not available.";
@@ -379,6 +376,10 @@ TEST(AutoPartitionerSm1xxPhase4, TmemEpilogueConnectivityAndClusterWriterGuard) 
       "SM100 TensorOp accumulator fragment must be backed by TMEM.");
   static_assert(!std::is_void<typename PartC::TmemToSmemCopy>::value,
       "RoleC must expose TMEM-to-SMEM unload copy.");
+  static_assert(!std::is_void<typename PartC::SmemToRegCopy>::value,
+      "RoleC must expose SMEM-to-register copy for fused epilogues.");
+  static_assert(!std::is_void<typename PartC::RegToSmemCopy>::value,
+      "RoleC must expose register-to-SMEM copy for fused epilogues.");
   static_assert(PartC::UsesTmaStore, "16B C alignment should select TMA store for epilogue.");
 
   if (!has_cuda_device()) {
