@@ -881,7 +881,9 @@ struct Sm80TensorOpMainloopRole
         (std::is_same<Element, cutlass::half_t>::value || std::is_same<Element, cutlass::bfloat16_t>::value) &&
         (TileMN % 8 == 0) && Sm80TensorOpSwizzleRow<Element, TileK>::Supported;
 
-    // static constexpr int SwizzleBase = UseLdMatrix ? Sm80TensorOpSwizzleRow<Element, TileK>::Base : 0;
+    static constexpr int SwizzleBase = UseLdMatrix ? Sm80TensorOpSwizzleRow<Element, TileK>::Base : 0;
+    static constexpr int SwizzleBytes = UseLdMatrix ? Sm80TensorOpSwizzleRow<Element, TileK>::Bytes : 0;
+    static constexpr int SwizzleElements = UseLdMatrix ? Sm80TensorOpSwizzleRow<Element, TileK>::Elements : 0;
     using MmaOperation = typename Sm80TensorOpTraits<Element>::MmaOperation;
 
     using SmemLayoutAtom =
@@ -945,6 +947,52 @@ struct Sm80TensorOpRoleB
                                ThreadCount, false, GmemAlignmentBytes>
 {
 };
+
+template <int Bytes> struct Sm80EpilogueSwizzleBase;
+template <> struct Sm80EpilogueSwizzleBase<32>
+{
+    static constexpr int value = 1;
+};
+template <> struct Sm80EpilogueSwizzleBase<64>
+{
+    static constexpr int value = 2;
+};
+template <> struct Sm80EpilogueSwizzleBase<128>
+{
+    static constexpr int value = 3;
+};
+
+template <int InstructionBytes> struct Sm80EpilogueSwizzleBytes
+{
+    static constexpr int value = (InstructionBytes >= 128) ? 128 : (InstructionBytes >= 64) ? 64
+                                                                 : (InstructionBytes >= 32) ? 32
+                                                                                            : 0;
+    static_assert(value != 0, "SM80 epilogue swizzle requires at least a 32-byte instruction span.");
+};
+
+template <class Element, int LogicalMajorExtent, int VectorBytes, bool IsMnMajor>
+struct Sm80TensorOpEpilogueSmemLayoutSelector
+{
+    static constexpr int InstructionThreads = 16;
+    static constexpr int InstructionBytes = InstructionThreads * VectorBytes;
+    static constexpr int SwizzleBytes = Sm80EpilogueSwizzleBytes<InstructionBytes>::value;
+    static constexpr int SwizzleBase = Sm80EpilogueSwizzleBase<SwizzleBytes>::value;
+    static constexpr int RowElements = SwizzleBytes / int(sizeof(Element));
+
+    static_assert((SwizzleBytes % int(sizeof(Element))) == 0,
+                  "SM80 epilogue swizzle span must be element-addressable.");
+    static_assert((LogicalMajorExtent % RowElements) == 0,
+                  "SM80 epilogue logical row must be covered by whole swizzle atoms.");
+
+    using SwizzleAtom = cute::conditional_t<
+        IsMnMajor,
+        decltype(cute::composition(
+            cute::Swizzle<SwizzleBase, 3, 3>{},
+            cute::Layout<cute::Shape<cute::Int<RowElements>, cute::_16>, cute::Stride<cute::_1, cute::Int<RowElements>>>{})),
+        decltype(cute::composition(
+            cute::Swizzle<SwizzleBase, 3, 3>{},
+            cute::Layout<cute::Shape<cute::_16, cute::Int<RowElements>>, cute::Stride<cute::Int<RowElements>, cute::_1>>{}))>;
+};
 /**
  * @brief Defines the output layout, threading structure, accumulator tracking, and epilogue data copies
  * for the C/D matrix role in an SM80 TensorOp kernel.
@@ -986,42 +1034,41 @@ struct Sm80TensorOpRoleC
     using TiledMma = typename TiledMmaSelector::type;
 
     static constexpr bool IsMnMajor = cutlass::gemm::detail::is_mn_major<GmemStride>();
-    /// TODO:使用官方的cutlass::epilogue::collective::CollectiveBuilder重构mma计算完成后的后续写出layout，不要使用padding，重构完成以后重写sm80_autopartition_gemm.cu，完全使用autopartition中提供的自动化布局接口来实现tensorop的gemm的计算和写回，也就是说如果需要布局或者atom，优先查看autopartition中是否有提供实现或者接口，优先使用autopartition中的实现，并且修改完成以后通过验收测试，保证没有严重的降速问题，也就是说autopartition提供的layout是正确的有效的
-    static constexpr int Padding = SmemPaddingElements<EpilogueElement>::value;
-    using SmemLayoutAtom = cute::conditional_t<
-        IsMnMajor,
-        cute::Layout<cute::Shape<cute::Int<BlkM>, cute::Int<BlkN>>, cute::Stride<cute::_1, cute::Int<BlkM + Padding>>>,
-        cute::Layout<cute::Shape<cute::Int<BlkM>, cute::Int<BlkN>>, cute::Stride<cute::Int<BlkN + Padding>, cute::_1>>>;
-    using SmemLayout = SmemLayoutAtom;
-
-    static constexpr int OutputPadding = SmemPaddingElements<ElementOutput>::value;
-    using OutputSmemLayoutAtom =
-        cute::conditional_t<IsMnMajor,
-                            cute::Layout<cute::Shape<cute::Int<BlkM>, cute::Int<BlkN>>,
-                                         cute::Stride<cute::_1, cute::Int<BlkM + OutputPadding>>>,
-                            cute::Layout<cute::Shape<cute::Int<BlkM>, cute::Int<BlkN>>,
-                                         cute::Stride<cute::Int<BlkN + OutputPadding>, cute::_1>>>;
-    using OutputSmemLayout = OutputSmemLayoutAtom;
-
-    static constexpr int ContiguousDimLength = IsMnMajor ? BlkM : BlkN;
-    static constexpr int EpilogueAlignmentElements =
-        GmemVectorAlignment<EpilogueElement, ContiguousDimLength, 16>::value;
-    static constexpr int EpilogueAlignmentBits = EpilogueAlignmentElements * int(sizeof(EpilogueElement)) * 8;
-    static constexpr int AlignmentElements = EpilogueAlignmentElements;
-    static constexpr int AlignmentBits = EpilogueAlignmentBits;
-
-    using SmemToRegCopyOperation = cute::AutoVectorizingCopyWithAssumedAlignment<EpilogueAlignmentBits>;
-    using RegToSmemCopyOperation = cute::AutoVectorizingCopyWithAssumedAlignment<EpilogueAlignmentBits>;
-    using SmemToRegCopy = cute::Copy_Atom<SmemToRegCopyOperation, EpilogueElement>;
-    using RegToSmemCopy = cute::Copy_Atom<RegToSmemCopyOperation, EpilogueElement>;
 
     static constexpr int OutputAlignmentElements =
         GmemTiledCopyAlignment<ElementOutput, BlkM, BlkN, ThreadCount, IsMnMajor, GmemAlignmentBytes>::value;
     static constexpr int OutputAlignmentBytes =
         GmemTiledCopyAlignment<ElementOutput, BlkM, BlkN, ThreadCount, IsMnMajor, GmemAlignmentBytes>::bytes;
     static constexpr int OutputAlignmentBits = OutputAlignmentBytes * 8;
+
+    static constexpr int EpilogueInstructionThreads = 16;
+    static constexpr int EpilogueVectorElements = OutputAlignmentElements;
+    static constexpr int EpilogueVectorBytes = OutputAlignmentBytes;
+    static constexpr int EpilogueVectorBits = OutputAlignmentBits;
+    static constexpr int EpilogueLogicalMajorExtent = IsMnMajor ? BlkM : BlkN;
+    static constexpr int AlignmentElements = OutputAlignmentElements;
+    static constexpr int AlignmentBits = OutputAlignmentBits;
+    static constexpr int EpilogueAlignmentElements = OutputAlignmentElements;
+    static constexpr int EpilogueAlignmentBits = OutputAlignmentBits;
     static constexpr int GmemToSmemAlignmentBytes = OutputAlignmentBytes;
     using OutputAlignmentType = cute::uint_byte_t<OutputAlignmentBytes>;
+
+    using OutputSwizzleSelector = Sm80TensorOpEpilogueSmemLayoutSelector<ElementOutput,
+                                                                         EpilogueLogicalMajorExtent,
+                                                                         EpilogueVectorBytes,
+                                                                         IsMnMajor>;
+    static constexpr int EpilogueSwizzleBytes = OutputSwizzleSelector::SwizzleBytes;
+    static constexpr int EpilogueSwizzleBase = OutputSwizzleSelector::SwizzleBase;
+    using OutputSmemLayoutAtom = typename OutputSwizzleSelector::SwizzleAtom;
+    using OutputSmemLayout = decltype(cute::tile_to_shape(
+        OutputSmemLayoutAtom{}, cute::Shape<cute::Int<BlkM>, cute::Int<BlkN>>{}));
+    using SmemLayoutAtom = OutputSmemLayoutAtom;
+    using SmemLayout = OutputSmemLayout;
+
+    using SmemToRegCopyOperation = cute::AutoVectorizingCopyWithAssumedAlignment<OutputAlignmentBits>;
+    using RegToSmemCopyOperation = cute::AutoVectorizingCopyWithAssumedAlignment<OutputAlignmentBits>;
+    using SmemToRegCopy = cute::Copy_Atom<SmemToRegCopyOperation, ElementOutput>;
+    using RegToSmemCopy = cute::Copy_Atom<RegToSmemCopyOperation, ElementOutput>;
 
     using GmemToSmemCopy =
         decltype(cutlass::gemm::collective::detail::make_simt_gmem_tiled_copy<

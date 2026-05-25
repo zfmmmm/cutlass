@@ -657,8 +657,8 @@ TEST(AutoPartitionerSm80Phase4, RegisterPressureAndEpilogueStore)
                                 cute::Layout<cute::Shape<cute::Int<64>, cute::Int<64>>,
                                              cute::Stride<cute::_1, cute::Int<72>>>>::value,
                   "SM80 RoleC output shared layout must not be the old padding layout.");
-    static_assert(cute::stride<1>(typename EpiPartC::OutputSmemLayout{}) * int(sizeof(EpiOutput)) % 16 == 0,
-                  "Output shared layout must keep each output column 16B aligned for vectorized stores.");
+    static_assert((EpiPartC::EpilogueSwizzleBytes % EpiPartC::OutputAlignmentBytes) == 0,
+                  "Output shared layout swizzle span must cover whole output vectors.");
 
     std::vector<EpiOutput> hC(64 * 64);
     EpiOutput             *dC = nullptr;
