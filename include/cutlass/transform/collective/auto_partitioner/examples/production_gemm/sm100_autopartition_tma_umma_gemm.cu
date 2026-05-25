@@ -242,7 +242,7 @@ __global__ void autopartition_sm100_tma_umma_kernel(ATensor                     
 
             tma_store_fence();
             __syncthreads();
-            if (elect_one_thr) {
+            if (elect_one_warp && elect_one_thr) {
                 copy(tma_store_D, bSG_sD, bSG_gD(_, _, _, epi_m, epi_n));
                 tma_store_arrive();
                 tma_store_wait<0>();
