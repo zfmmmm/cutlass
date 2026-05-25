@@ -220,11 +220,13 @@ __global__ void sm80_tensorop_gemm_one_tile_kernel(InputElement const *ptr_A,
     {
         cute::array_aligned<InputElement, cute::cosize_v<typename PartA::SmemLayout>> smemA;
         cute::array_aligned<InputElement, cute::cosize_v<typename PartB::SmemLayout>> smemB;
+        cute::array_aligned<typename PartC::ElementOutput, cute::cosize_v<typename PartC::OutputSmemLayout>> smemC;
     };
     __shared__ SharedStorage smem;
 
     Tensor sA = make_tensor(make_smem_ptr(smem.smemA.data()), typename PartA::SmemLayout{});
     Tensor sB = make_tensor(make_smem_ptr(smem.smemB.data()), typename PartB::SmemLayout{});
+    Tensor sC = make_tensor(make_smem_ptr(smem.smemC.data()), typename PartC::OutputSmemLayout{});
 
     cute::cooperative_copy<128, PartA::GmemToSmemAlignmentBytes * 8>(
         threadIdx.x, gA, sA, typename PartA::GmemToSmemCopy{});
@@ -249,7 +251,23 @@ __global__ void sm80_tensorop_gemm_one_tile_kernel(InputElement const *ptr_A,
                            cute::identity{},
                            typename PartA::SmemToRegCopyOperation{},
                            typename PartB::SmemToRegCopyOperation{});
-    autopartition::examples::convert_tensor(tCgC, tCrC);
+
+    Tensor tCrD = make_fragment_like<typename PartC::ElementOutput>(tCrC);
+    cutlass::NumericConverter<typename PartC::ElementOutput, typename PartC::ElementCompute> convert;
+    CUTE_UNROLL
+    for (int i = 0; i < cute::size(tCrC); ++i) {
+        tCrD(i) = convert(tCrC(i));
+    }
+
+    auto smem_tiled_copy_C = make_tiled_copy_C(
+        Copy_Atom<typename PartC::RegToSmemCopyOperation, typename PartC::ElementOutput>{}, thr_mma);
+    auto   smem_thr_copy_C = smem_tiled_copy_C.get_thread_slice(threadIdx.x);
+    Tensor tCsC            = smem_thr_copy_C.partition_D(sC);
+    Tensor tCrD_view       = smem_thr_copy_C.retile_S(tCrD);
+    copy(smem_tiled_copy_C, tCrD_view, tCsC);
+    __syncthreads();
+
+    cute::cooperative_copy<128, PartC::OutputAlignmentBits>(threadIdx.x, sC, gC, typename PartC::SmemToGmemCopy{});
 }
 
 __global__ void
@@ -626,6 +644,19 @@ TEST(AutoPartitionerSm80Phase4, RegisterPressureAndEpilogueStore)
                   "Epilogue global store uses the requested output type.");
     static_assert(EpiPartC::OutputAlignmentBytes == 16,
                   "Half output epilogue should use 128-bit vectorized global stores when C is 16B aligned.");
+    static_assert(EpiPartC::EpilogueInstructionThreads == 16,
+                  "SM80 epilogue swizzle must model the 16-thread store/load issue group.");
+    static_assert(EpiPartC::OutputAlignmentBytes == EpiPartC::EpilogueVectorBytes,
+                  "RoleC output vector width must be derived from the selected output tiled-copy alignment.");
+    static_assert(EpiPartC::EpilogueSwizzleBytes == 32 || EpiPartC::EpilogueSwizzleBytes == 64 ||
+                      EpiPartC::EpilogueSwizzleBytes == 128,
+                  "RoleC epilogue swizzle must use a supported shared-memory swizzle span.");
+    static_assert(cute::cosize_v<typename EpiPartC::OutputSmemLayout> == EpiPartC::BlkM * EpiPartC::BlkN,
+                  "SM80 RoleC output shared layout must not allocate padding elements.");
+    static_assert(!std::is_same<typename EpiPartC::OutputSmemLayout,
+                                cute::Layout<cute::Shape<cute::Int<64>, cute::Int<64>>,
+                                             cute::Stride<cute::_1, cute::Int<72>>>>::value,
+                  "SM80 RoleC output shared layout must not be the old padding layout.");
     static_assert(cute::stride<1>(typename EpiPartC::OutputSmemLayout{}) * int(sizeof(EpiOutput)) % 16 == 0,
                   "Output shared layout must keep each output column 16B aligned for vectorized stores.");
 

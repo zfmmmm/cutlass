@@ -71,6 +71,19 @@ static_assert(std::is_same<typename ExtendedPartC::ElementOutput, cutlass::half_
 static_assert(std::is_same<typename ExtendedPartC::Accumulator, float>::value,
               "Accumulator remains compute type.");
 static_assert(ExtendedPartC::OutputAlignmentBytes == 4, "RoleC should use explicit C alignment.");
+static_assert(ExtendedPartC::EpilogueInstructionThreads == 16,
+              "SM80 TensorOp RoleC epilogue swizzle must model the 16-thread issue group.");
+static_assert(ExtendedPartC::OutputAlignmentBytes == ExtendedPartC::EpilogueVectorBytes,
+              "SM80 TensorOp RoleC output vector width must follow the selected tiled-copy alignment.");
+static_assert(ExtendedPartC::EpilogueSwizzleBytes == 32 || ExtendedPartC::EpilogueSwizzleBytes == 64 ||
+                  ExtendedPartC::EpilogueSwizzleBytes == 128,
+              "SM80 TensorOp RoleC epilogue swizzle span must be a supported shared-memory swizzle size.");
+static_assert(cute::cosize_v<typename ExtendedPartC::OutputSmemLayout> == ExtendedPartC::BlkM * ExtendedPartC::BlkN,
+              "SM80 TensorOp RoleC output shared layout must not allocate padding elements.");
+static_assert(!std::is_same<typename ExtendedPartC::OutputSmemLayout,
+                            cute::Layout<cute::Shape<cute::Int<64>, cute::Int<64>>,
+                                         cute::Stride<cute::Int<72>, cute::_1>>>::value,
+              "SM80 TensorOp RoleC output shared layout must not be the old padding layout.");
 
 using SimtArch = cutlass::arch::Sm80;
 using SimtOpClass = cutlass::arch::OpClassSimt;
