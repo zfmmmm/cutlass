@@ -1,7 +1,8 @@
 #include <cuda_runtime.h>
+#include <cute/tensor.hpp>
+#include <cute/atom/copy_atom.hpp>
 #include <cute/algorithm/cooperative_copy.hpp>
 #include <cute/algorithm/cooperative_gemm.hpp>
-#include <cute/tensor.hpp>
 #include <cute/util/print_tensor.hpp>
 #include <iostream>
 #include <type_traits>
@@ -49,13 +50,13 @@ __global__ void sm80_autopartition_gemm_kernel(InputElement const *ptr_A,
     {
         cute::array_aligned<InputElement, cute::cosize_v<typename PartA::SmemLayout>>            smemA;
         cute::array_aligned<InputElement, cute::cosize_v<typename PartB::SmemLayout>>            smemB;
-        cute::array_aligned<OutputElement, cute::cosize_v<typename PartC::SharedToGlobalLayout>> smemC;
+        cute::array_aligned<OutputElement, cute::cosize_v<typename PartC::OutputSmemLayout>> smemC;
     };
     __shared__ SharedStorage shared;
 
     Tensor sA = make_tensor(make_smem_ptr(shared.smemA.data()), typename PartA::SmemLayout{});
     Tensor sB = make_tensor(make_smem_ptr(shared.smemB.data()), typename PartB::SmemLayout{});
-    Tensor sC = make_tensor(make_smem_ptr(shared.smemC.data()), typename PartC::SharedToGlobalLayout{});
+    Tensor sC = make_tensor(make_smem_ptr(shared.smemC.data()), typename PartC::OutputSmemLayout{});
 
     typename PartC::TiledMma mma;
     auto                     thr_mma = mma.get_thread_slice(threadIdx.x);
@@ -105,7 +106,7 @@ __global__ void sm80_autopartition_gemm_kernel(InputElement const *ptr_A,
     copy(smem_tiled_copy_C, tCrD_view, tCsC);
     __syncthreads();
 
-    cooperative_copy<ThreadCount, PartC::GmemToSmemAlignmentBytes * 8>(
+    cooperative_copy<ThreadCount, PartC::OutputAlignmentBits>(
         threadIdx.x, sC, gC, typename PartC::SmemToGmemCopy{});
 }
 
@@ -178,6 +179,10 @@ int main(int argc, char **argv)
                   "64x64x64 half tiles must route to Swizzle<3,3,3> shared layouts.");
     static_assert(!std::is_void<typename PartC::SmemToGmemCopy>::value,
                   "SM80 epilogue must expose a shared-to-global vectorized store.");
+    static_assert(PartC::EpilogueInstructionThreads == 16,
+                  "SM80 epilogue writeback must use the 16-thread shared-memory issue group model.");
+    static_assert(cute::cosize_v<typename PartC::OutputSmemLayout> == int(size<0>(TileShape{})) * int(size<1>(TileShape{})),
+                  "SM80 production epilogue shared layout must be padding-free.");
 
     int padded_m = round_up(options.m, int(size<0>(TileShape{})));
     int padded_n = round_up(options.n, int(size<1>(TileShape{})));
@@ -189,8 +194,8 @@ int main(int argc, char **argv)
         print_layout(typename PartA::SmemLayout{});
         std::cout << "PartB::SmemLayout\n";
         print_layout(typename PartB::SmemLayout{});
-        std::cout << "PartC::SharedToGlobalLayout\n";
-        print_layout(typename PartC::SharedToGlobalLayout{});
+        std::cout << "PartC::OutputSmemLayout\n";
+        print_layout(typename PartC::OutputSmemLayout{});
     }
 
     std::vector<InputElement>  hA(padded_m * padded_k);
