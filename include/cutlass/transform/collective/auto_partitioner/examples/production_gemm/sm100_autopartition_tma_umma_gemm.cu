@@ -9,8 +9,10 @@
 #include <cutlass/arch/barrier.h>
 #include <cutlass/cluster_launch.hpp>
 #include <cutlass/half.h>
+#include <cutlass/numeric_conversion.h>
 
 #include <cute/tensor.hpp>
+#include <cute/atom/copy_atom.hpp>
 #include <cute/algorithm/cooperative_copy.hpp>
 #include <cute/arch/cluster_sm90.hpp>
 #include <cute/arch/tmem_allocator_sm100.hpp>
@@ -71,12 +73,21 @@ static_assert(std::is_void<typename PartA::SmemToRegCopy>::value && std::is_void
               "SM100 UMMA consumes SMEM descriptors directly.");
 static_assert(cute::is_base_of<cute::UMMA::tmem_frg_base, typename TiledMma::FrgTypeC>::value,
               "SM100 accumulator must be backed by TMEM.");
-static_assert(!std::is_void<typename PartC::TmemToSmemCopy>::value, "RoleC must expose a TMEM unload channel.");
+static_assert(!std::is_void<typename PartC::TmemToRegisterCopyOperation>::value,
+              "RoleC must expose the builder-selected TMEM-to-register copy.");
+static_assert(!std::is_void<typename PartC::RegisterToSharedCopyOperation>::value,
+              "RoleC must expose the builder-selected register-to-shared copy.");
+static_assert(!std::is_void<typename PartC::SharedToGlobalCopyOperation>::value,
+              "RoleC must expose the builder-selected shared-to-global copy.");
+static_assert(cute::cosize_v<typename PartC::SharedToGlobalLayout> > 0,
+              "SM100 RoleC must expose a concrete output shared-memory layout.");
 
-template <class TypeA, class TypeB, class TypeD, class ASmemLayout, class BSmemLayout> struct SharedStorage
+template <class TypeA, class TypeB, class TypeD, class ASmemLayout, class BSmemLayout, class DSmemLayout>
+struct SharedStorage
 {
     alignas(128) cute::ArrayEngine<TypeA, cute::cosize_v<ASmemLayout>> A;
     alignas(128) cute::ArrayEngine<TypeB, cute::cosize_v<BSmemLayout>> B;
+    alignas(128) cute::ArrayEngine<TypeD, cute::cosize_v<DSmemLayout>> D;
 
     alignas(16) cute::uint64_t mma_barrier;
     alignas(16) cute::uint64_t tma_barrier;
@@ -84,6 +95,7 @@ template <class TypeA, class TypeB, class TypeD, class ASmemLayout, class BSmemL
 
     CUTE_DEVICE constexpr auto tensor_sA() { return cute::make_tensor(cute::make_smem_ptr(A.begin()), ASmemLayout{}); }
     CUTE_DEVICE constexpr auto tensor_sB() { return cute::make_tensor(cute::make_smem_ptr(B.begin()), BSmemLayout{}); }
+    CUTE_DEVICE constexpr auto tensor_sD() { return cute::make_tensor(cute::make_smem_ptr(D.begin()), DSmemLayout{}); }
 };
 
 template <class SharedStorage,
@@ -94,6 +106,7 @@ template <class SharedStorage,
           class TiledMMA,
           class TmaAtomA,
           class TmaAtomB,
+          class TmaAtomD,
           class Alpha>
 __global__ void autopartition_sm100_tma_umma_kernel(ATensor                           mA,
                                                     BTensor                           mB,
@@ -102,6 +115,7 @@ __global__ void autopartition_sm100_tma_umma_kernel(ATensor                     
                                                     TiledMMA                          tiled_mma,
                                                     CUTE_GRID_CONSTANT TmaAtomA const tma_atom_A,
                                                     CUTE_GRID_CONSTANT TmaAtomB const tma_atom_B,
+                                                    CUTE_GRID_CONSTANT TmaAtomD const tma_store_D,
                                                     Alpha                             alpha)
 {
     using namespace cute;
@@ -115,6 +129,7 @@ __global__ void autopartition_sm100_tma_umma_kernel(ATensor                     
     SharedStorage         &shared_storage = *reinterpret_cast<SharedStorage *>(shared_memory);
     Tensor                 tCsA           = shared_storage.tensor_sA();
     Tensor                 tCsB           = shared_storage.tensor_sB();
+    Tensor                 sD             = as_position_independent_swizzle_tensor(shared_storage.tensor_sD());
 
     ThrMMA cta_mma = tiled_mma.get_slice(Int<0>{});
     Tensor tCgA    = cta_mma.partition_A(gA);
@@ -173,17 +188,68 @@ __global__ void autopartition_sm100_tma_umma_kernel(ATensor                     
         mma_barrier_phase_bit ^= 1;
     }
 
-    TiledCopy tiled_t2r_copy = make_tmem_copy(cute::SM100_TMEM_LOAD_32dp32b1x{}, tCtAcc);
-    ThrCopy   thr_t2r_copy   = tiled_t2r_copy.get_slice(threadIdx.x);
-    Tensor    tDtAcc         = thr_t2r_copy.partition_S(tCtAcc);
-    Tensor    tDgD           = thr_t2r_copy.partition_D(tCgD);
-    Tensor    tDrD           = make_tensor<typename decltype(tCtAcc)::value_type>(shape(tDgD));
-    copy(tiled_t2r_copy, tDtAcc, tDrD);
-    CUTE_UNROLL
-    for (int i = 0; i < size(tDrD); ++i) {
-        tDrD(i) = alpha * tDrD(i);
+    Tensor tAcc     = tCtAcc(make_coord(_, _), _0{}, _0{});
+    Tensor tAcc_epi = flat_divide(tAcc, typename PartC::EpilogueTile{});
+    Tensor gD_epi   = flat_divide(gD, typename PartC::EpilogueTile{});
+
+    TiledCopy tiled_t2r_copy =
+        make_tmem_copy(typename PartC::TmemToRegisterCopyOperation{}, tAcc_epi(_, _, _0{}, _0{}));
+    ThrCopy thr_t2r_copy = tiled_t2r_copy.get_slice(threadIdx.x);
+    Tensor  tTR_tAcc     = thr_t2r_copy.partition_S(tAcc_epi);
+    Tensor  tTR_sD       = thr_t2r_copy.partition_D(sD);
+
+    using ComputeElement = typename PartC::ElementCompute;
+    Tensor tTR_rAcc      = make_tensor<ComputeElement>(shape(tTR_sD));
+    Tensor tTR_rD        = make_tensor<OutputElement>(shape(tTR_sD));
+
+    TiledCopy tiled_r2s_copy =
+        make_tiled_copy_D(Copy_Atom<typename PartC::RegisterToSharedCopyOperation, OutputElement>{}, tiled_t2r_copy);
+    ThrCopy thr_r2s_copy = tiled_r2s_copy.get_slice(threadIdx.x);
+    Tensor  tRS_rD       = thr_r2s_copy.retile_S(tTR_rD);
+    Tensor  tRS_sD       = thr_r2s_copy.partition_D(sD);
+
+    ThrCopy thrblk_s2g_copy = tma_store_D.get_slice(Int<0>{});
+    Tensor  bSG_sD          = thrblk_s2g_copy.partition_S(sD);
+    Tensor  bSG_gD          = thrblk_s2g_copy.partition_D(gD_epi);
+
+    cutlass::NumericConverter<OutputElement, ComputeElement> convert;
+    Layout tmem_warp_layout =
+        typename decltype(make_tmem_warp_partitioner(tAcc_epi(_, _, _0{}, _0{})))::TiledLayout_TV{};
+    constexpr bool predicate_tmem_load = size(tmem_warp_layout) != cosize(tmem_warp_layout);
+    int            warp_idx            = threadIdx.x / cutlass::NumThreadsPerWarp;
+
+    constexpr int NumEpiSubtilesN = CUTE_STATIC_V(size<3>(gD_epi));
+    constexpr int NumEpiSubtilesM = CUTE_STATIC_V(size<2>(gD_epi));
+#pragma unroll
+    for (int epi_n = 0; epi_n < NumEpiSubtilesN; ++epi_n) {
+#pragma unroll
+        for (int epi_m = 0; epi_m < NumEpiSubtilesM; ++epi_m) {
+            Tensor tTR_tAcc_mn  = tTR_tAcc(_, _, _, epi_m, epi_n);
+            bool   issue_t2r    = true;
+            if constexpr (predicate_tmem_load) {
+                int subpart_idx = (tTR_tAcc_mn.data().dp_ / 32) % 4;
+                issue_t2r       = warp_idx == subpart_idx;
+            }
+
+            if (issue_t2r) {
+                copy(tiled_t2r_copy, tTR_tAcc_mn, tTR_rAcc);
+                CUTE_UNROLL
+                for (int i = 0; i < size(tTR_rAcc); ++i) {
+                    tTR_rD(i) = convert(alpha * tTR_rAcc(i));
+                }
+                copy(tiled_r2s_copy, tRS_rD, tRS_sD);
+            }
+
+            tma_store_fence();
+            __syncthreads();
+            if (elect_one_thr) {
+                copy(tma_store_D, bSG_sD, bSG_gD(_, _, _, epi_m, epi_n));
+                tma_store_arrive();
+                tma_store_wait<0>();
+            }
+            __syncthreads();
+        }
     }
-    copy(tDrD, tDgD);
 
     __syncthreads();
     if (elect_one_warp) {
@@ -338,19 +404,30 @@ int main(int argc, char **argv)
                                             mma_tiler,
                                             tiled_mma,
                                             cluster_layout_vmnk);
+    auto     tma_store_D         = make_tma_copy(typename PartC::SharedToGlobalCopyOperation{},
+                                        mD,
+                                        typename PartC::SharedToGlobalLayout{},
+                                        typename PartC::EpilogueTile{},
+                                        _1{});
     Tensor   mA_tma              = tma_atom_A.get_tma_tensor(shape(mA));
     Tensor   mB_tma              = tma_atom_B.get_tma_tensor(shape(mB));
+    Tensor   mD_tma              = tma_store_D.get_tma_tensor(shape(mD));
 
-    using Storage =
-        SharedStorage<Element, Element, OutputElement, typename PartA::SmemLayout, typename PartB::SmemLayout>;
+    using Storage = SharedStorage<Element,
+                                  Element,
+                                  OutputElement,
+                                  typename PartA::SmemLayout,
+                                  typename PartB::SmemLayout,
+                                  typename PartC::SharedToGlobalLayout>;
     auto *kernel     = &autopartition_sm100_tma_umma_kernel<Storage,
                                                             decltype(mA_tma),
                                                             decltype(mB_tma),
-                                                            decltype(mD),
+                                                            decltype(mD_tma),
                                                             decltype(mma_tiler),
                                                             TiledMma,
                                                             decltype(tma_atom_A),
                                                             decltype(tma_atom_B),
+                                                            decltype(tma_store_D),
                                                             float>;
     int   smem_bytes = sizeof(Storage);
     cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes);
@@ -358,7 +435,8 @@ int main(int argc, char **argv)
     dim3 block(ThreadCount);
     dim3 grid(padded_m / bM, padded_n / bN);
     auto launch = [&]() {
-        kernel<<<grid, block, smem_bytes>>>(mA_tma, mB_tma, mD, mma_tiler, tiled_mma, tma_atom_A, tma_atom_B, 1.0f);
+        kernel<<<grid, block, smem_bytes>>>(
+            mA_tma, mB_tma, mD_tma, mma_tiler, tiled_mma, tma_atom_A, tma_atom_B, tma_store_D, 1.0f);
     };
 
     float runtime_ms = time_launch_ms(launch, options.warmup, options.iterations);
