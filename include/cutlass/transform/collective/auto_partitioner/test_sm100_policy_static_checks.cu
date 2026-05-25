@@ -81,6 +81,19 @@ static_assert(!std::is_same<typename PartC_Tma::SmemToGmemCopy, cute::SM90_TMA_S
               "Epilogue store must expose a host-encoded TMA TiledCopy, not a raw opcode tag.");
 static_assert(!std::is_void<typename PartC_Tma::TmemToSmemCopy>::value,
               "SM100 RoleC must expose the TMEM-to-SMEM unload copy.");
+static_assert(!std::is_void<typename PartC_Tma::CollectiveEpilogue>::value,
+              "SM100 RoleC must expose the official CollectiveBuilder epilogue type.");
+static_assert(!std::is_void<typename PartC_Tma::EpilogueTile>::value,
+              "SM100 RoleC must expose the official epilogue tile.");
+static_assert(cute::cosize_v<typename PartC_Tma::SharedToGlobalLayout> == PartC_Tma::BlkM * PartC_Tma::BlkN ||
+                  cute::cosize_v<typename PartC_Tma::SharedToGlobalLayout> > 0,
+              "SM100 RoleC must expose a usable official-derived shared-to-global layout.");
+static_assert(!std::is_void<typename PartC_Tma::TmemToRegisterCopyOperation>::value,
+              "SM100 RoleC must expose official TMEM-to-register copy op.");
+static_assert(!std::is_void<typename PartC_Tma::RegisterToSharedCopyOperation>::value,
+              "SM100 RoleC must expose official register-to-shared copy op.");
+static_assert(!std::is_void<typename PartC_Tma::SharedToGlobalCopyOperation>::value,
+              "SM100 RoleC must expose official shared-to-global copy op.");
 
 using SimtK32Tile          = cute::Shape<cute::Int<64>, cute::Int<64>, cute::Int<32>>;
 using Sm100SimtK32Fallback = typename autopartition::AutoPartitioner<cutlass::arch::Sm100,

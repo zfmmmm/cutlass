@@ -370,6 +370,19 @@ TEST(AutoPartitionerSm1xxPhase4, TmemEpilogueConnectivityAndClusterWriterGuard) 
   static_assert(!std::is_void<typename PartC::RegToSmemCopy>::value,
       "RoleC must expose register-to-SMEM copy for fused epilogues.");
   static_assert(PartC::UsesTmaStore, "16B C alignment should select TMA store for epilogue.");
+  static_assert(!std::is_void<typename PartC::CollectiveEpilogue>::value,
+      "SM100 RoleC must expose the official CollectiveBuilder epilogue type.");
+  static_assert(!std::is_void<typename PartC::EpilogueTile>::value,
+      "SM100 RoleC must expose the official epilogue tile.");
+  static_assert(cute::cosize_v<typename PartC::SharedToGlobalLayout> == PartC::BlkM * PartC::BlkN ||
+                    cute::cosize_v<typename PartC::SharedToGlobalLayout> > 0,
+      "SM100 RoleC must expose a usable official-derived shared-to-global layout.");
+  static_assert(!std::is_void<typename PartC::TmemToRegisterCopyOperation>::value,
+      "SM100 RoleC must expose official TMEM-to-register copy op.");
+  static_assert(!std::is_void<typename PartC::RegisterToSharedCopyOperation>::value,
+      "SM100 RoleC must expose official register-to-shared copy op.");
+  static_assert(!std::is_void<typename PartC::SharedToGlobalCopyOperation>::value,
+      "SM100 RoleC must expose official shared-to-global copy op.");
 
   if (!has_cuda_device()) {
     GTEST_SKIP() << "CUDA device not available.";
