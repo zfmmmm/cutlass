@@ -1,4 +1,25 @@
 // clang-format off
+// #include <cstdio>
+// #include <iostream>
+// #include <type_traits>
+
+// #include <thrust/device_vector.h>
+// #include <thrust/host_vector.h>
+
+// #include <cutlass/arch/barrier.h>
+// #include <cutlass/cluster_launch.hpp>
+// #include <cutlass/half.h>
+// #include <cutlass/numeric_conversion.h>
+
+// #include <cute/tensor.hpp>
+// #include <cute/atom/copy_atom.hpp>
+// #include <cute/algorithm/cooperative_copy.hpp>
+// #include <cute/arch/cluster_sm90.hpp>
+// #include <cute/arch/tmem_allocator_sm100.hpp>
+// #include <cute/numeric/integral_constant.hpp>
+
+// #include "autopartition_production_common.hpp"
+// #include "cutlass/transform/collective/auto_partitioner/auto_partitioner_builder.hpp"
 #include <cstdio>
 #include <iostream>
 #include <type_traits>
@@ -213,7 +234,7 @@ __global__ void autopartition_sm100_tma_umma_kernel(ATensor                     
     Tensor  bSG_gD          = thrblk_s2g_copy.partition_D(gD_epi);
 
     cutlass::NumericConverter<OutputElement, ComputeElement> convert;
-    Layout tmem_warp_layout =
+    Layout                                                   tmem_warp_layout =
         typename decltype(make_tmem_warp_partitioner(tAcc_epi(_, _, _0{}, _0{})))::TiledLayout_TV{};
     constexpr bool predicate_tmem_load = size(tmem_warp_layout) != cosize(tmem_warp_layout);
     int            warp_idx            = threadIdx.x / cutlass::NumThreadsPerWarp;
@@ -224,8 +245,8 @@ __global__ void autopartition_sm100_tma_umma_kernel(ATensor                     
     for (int epi_n = 0; epi_n < NumEpiSubtilesN; ++epi_n) {
 #pragma unroll
         for (int epi_m = 0; epi_m < NumEpiSubtilesM; ++epi_m) {
-            Tensor tTR_tAcc_mn  = tTR_tAcc(_, _, _, epi_m, epi_n);
-            bool   issue_t2r    = true;
+            Tensor tTR_tAcc_mn = tTR_tAcc(_, _, _, epi_m, epi_n);
+            bool   issue_t2r   = true;
             if constexpr (predicate_tmem_load) {
                 int subpart_idx = (tTR_tAcc_mn.data().dp_ / 32) % 4;
                 issue_t2r       = warp_idx == subpart_idx;
@@ -405,20 +426,20 @@ int main(int argc, char **argv)
                                             tiled_mma,
                                             cluster_layout_vmnk);
     auto     tma_store_D         = make_tma_copy(typename PartC::SharedToGlobalCopyOperation{},
-                                        mD,
-                                        typename PartC::SharedToGlobalLayout{},
-                                        typename PartC::EpilogueTile{},
-                                        _1{});
+                                     mD,
+                                     typename PartC::SharedToGlobalLayout{},
+                                     typename PartC::EpilogueTile{},
+                                     _1{});
     Tensor   mA_tma              = tma_atom_A.get_tma_tensor(shape(mA));
     Tensor   mB_tma              = tma_atom_B.get_tma_tensor(shape(mB));
     Tensor   mD_tma              = tma_store_D.get_tma_tensor(shape(mD));
 
-    using Storage = SharedStorage<Element,
-                                  Element,
-                                  OutputElement,
-                                  typename PartA::SmemLayout,
-                                  typename PartB::SmemLayout,
-                                  typename PartC::SharedToGlobalLayout>;
+    using Storage    = SharedStorage<Element,
+                                     Element,
+                                     OutputElement,
+                                     typename PartA::SmemLayout,
+                                     typename PartB::SmemLayout,
+                                     typename PartC::SharedToGlobalLayout>;
     auto *kernel     = &autopartition_sm100_tma_umma_kernel<Storage,
                                                             decltype(mA_tma),
                                                             decltype(mB_tma),

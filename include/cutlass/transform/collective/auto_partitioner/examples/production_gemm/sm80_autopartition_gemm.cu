@@ -1,6 +1,20 @@
+// #include <cuda_runtime.h>
+// #include <cute/tensor.hpp>
+// #include <cute/atom/copy_atom.hpp>
+// #include <cute/algorithm/cooperative_copy.hpp>
+// #include <cute/algorithm/cooperative_gemm.hpp>
+// #include <cute/util/print_tensor.hpp>
+// #include <iostream>
+// #include <type_traits>
+// #include <vector>
+
+// #include "autopartition_production_common.hpp"
+// #include "cutlass/transform/collective/auto_partitioner/auto_partitioner_builder.hpp"
 #include <cuda_runtime.h>
 #include <cute/tensor.hpp>
+//
 #include <cute/atom/copy_atom.hpp>
+//
 #include <cute/algorithm/cooperative_copy.hpp>
 #include <cute/algorithm/cooperative_gemm.hpp>
 #include <cute/util/print_tensor.hpp>
@@ -10,7 +24,6 @@
 
 #include "autopartition_production_common.hpp"
 #include "cutlass/transform/collective/auto_partitioner/auto_partitioner_builder.hpp"
-
 using namespace cute;
 
 namespace autopartition_sm80_production {
@@ -48,8 +61,8 @@ __global__ void sm80_autopartition_gemm_kernel(InputElement const *ptr_A,
 
     struct SharedStorage
     {
-        cute::array_aligned<InputElement, cute::cosize_v<typename PartA::SmemLayout>>            smemA;
-        cute::array_aligned<InputElement, cute::cosize_v<typename PartB::SmemLayout>>            smemB;
+        cute::array_aligned<InputElement, cute::cosize_v<typename PartA::SmemLayout>>        smemA;
+        cute::array_aligned<InputElement, cute::cosize_v<typename PartB::SmemLayout>>        smemB;
         cute::array_aligned<OutputElement, cute::cosize_v<typename PartC::OutputSmemLayout>> smemC;
     };
     __shared__ SharedStorage shared;
@@ -106,8 +119,7 @@ __global__ void sm80_autopartition_gemm_kernel(InputElement const *ptr_A,
     copy(smem_tiled_copy_C, tCrD_view, tCsC);
     __syncthreads();
 
-    cooperative_copy<ThreadCount, PartC::OutputAlignmentBits>(
-        threadIdx.x, sC, gC, typename PartC::SmemToGmemCopy{});
+    cooperative_copy<ThreadCount, PartC::OutputAlignmentBits>(threadIdx.x, sC, gC, typename PartC::SmemToGmemCopy{});
 }
 
 __global__ void sm80_cp_async_zfill_probe_kernel(float const *in, float *out)
@@ -181,7 +193,8 @@ int main(int argc, char **argv)
                   "SM80 epilogue must expose a shared-to-global vectorized store.");
     static_assert(PartC::EpilogueInstructionThreads == 16,
                   "SM80 epilogue writeback must use the 16-thread shared-memory issue group model.");
-    static_assert(cute::cosize_v<typename PartC::OutputSmemLayout> == int(size<0>(TileShape{})) * int(size<1>(TileShape{})),
+    static_assert(cute::cosize_v<typename PartC::OutputSmemLayout>
+                      == int(size<0>(TileShape{})) * int(size<1>(TileShape{})),
                   "SM80 production epilogue shared layout must be padding-free.");
 
     int padded_m = round_up(options.m, int(size<0>(TileShape{})));
