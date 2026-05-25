@@ -10,7 +10,6 @@
 #include <cute/atom/copy_traits_sm80.hpp>
 #include <cute/atom/mma_atom.hpp>
 #include <cute/atom/mma_traits_sm100.hpp>
-#include <cute/atom/mma_traits_sm120.hpp>
 #include <cute/layout.hpp>
 #include <cute/tensor.hpp>
 
@@ -20,7 +19,6 @@
 #include <cutlass/gemm/collective/collective_mma_decl.hpp>
 #include <cutlass/gemm/collective/builders/sm100_common.inl>
 #include <cutlass/gemm/collective/builders/sm100_simt_builder.inl>
-#include <cutlass/gemm/collective/builders/sm120_common.inl>
 #include <cutlass/gemm/collective/builders/sm90_common.inl>
 #include <cutlass/gemm/gemm.h>
 #include <cutlass/numeric_types.h>
@@ -48,16 +46,6 @@ struct IsSm100TensorOpElement
                                        std::is_same<Element, cutlass::half_t>::value ||
                                        std::is_same<Element, cutlass::bfloat16_t>::value ||
                                        std::is_same<Element, int8_t>::value || std::is_same<Element, uint8_t>::value>
-{
-};
-/**
- * @brief Checks if the given data type is natively supported by SM120 Tensor Cores.
- * Specifically targets FP8 data formats introduced or optimized in recent architectures.
- * * @tparam Element The data type to evaluate. Supports cutlass::float_e4m3_t and cutlass::float_e5m2_t.
- */
-template <class Element>
-struct IsSm120TensorOpElement : std::integral_constant<bool, std::is_same<Element, cutlass::float_e4m3_t>::value ||
-                                                                 std::is_same<Element, cutlass::float_e5m2_t>::value>
 {
 };
 /**
@@ -597,155 +585,6 @@ struct Sm100TensorOpRoleC
     using RegisterToSharedLayout = OutputSmemLayout;
     using SharedToGlobalLayout = OutputSmemLayout;
 };
-// /**
-//  * @brief Base configuration struct for defining the Mainloop role for Tensor Core operations
-//  * on the SM120 architecture. Optimizes data loading layouts, heavily utilizing SM120
-//  * specific Shared Memory layouts (e.g., RR layouts for FP8 scaling).
-//  * * @tparam Element The input matrix data type (Targets FP8 types such as e4m3 / e5m2).
-//  * @tparam GmemStride Stride configuration in Global Memory.
-//  * @tparam TileShape_MNK The CTA-level tile shape <M, N, K>.
-//  * @tparam ThreadCount Number of threads per CTA.
-//  * @tparam GmemAlignmentBytes Global memory pointer alignment.
-//  * @tparam ClusterShape Shape of the Threadblock cluster.
-//  * @tparam IsRoleA Boolean flag: true if configuring Operand A, false for Operand B.
-//  */
-// template <class Element, class GmemStride, class TileShape_MNK, int ThreadCount, int GmemAlignmentBytes,
-//           class ClusterShape, bool IsRoleA>
-// struct Sm120TensorOpMainloopRole
-// {
-//     static_assert(IsSm120TensorOpElement<Element>::value, "SM120 TensorOp example path currently targets FP8
-//     inputs.");
-
-//     using ElementInput = Element;
-//     using ClusterShape_MNK = ClusterShape;
-//     static constexpr int GmemToSmemAlignmentBytes = GmemAlignmentBytes;
-
-//     using ElementMma =
-//         decltype(cutlass::gemm::collective::detail::sm1xx_kernel_input_element_to_mma_input_element<Element>());
-
-//     using SmemAllocElement = uint8_t;
-
-//     static constexpr int BlkMN = IsRoleA ? cute::size<0>(TileShape_MNK{}) : cute::size<1>(TileShape_MNK{});
-//     static constexpr int BlkK = cute::size<2>(TileShape_MNK{});
-
-//     using SmemLayoutAtom =
-//         decltype(cutlass::gemm::collective::detail::sm120_rr_smem_selector<SmemAllocElement, cute::Int<BlkK>>());
-//     using SmemLayout =
-//         decltype(cute::tile_to_shape(SmemLayoutAtom{}, cute::Shape<cute::Int<BlkMN>, cute::Int<BlkK>>{}));
-
-//     using ScaleElement = float;
-//     static constexpr int ScaleVectorSize = 32;
-//     static constexpr int ScaleKBlocks = (BlkK + ScaleVectorSize - 1) / ScaleVectorSize;
-//     using ScaleSmemLayout = cute::Layout<cute::Shape<cute::Int<BlkMN>, cute::Int<ScaleKBlocks>>>;
-
-//     using GmemToSmemCopy = cute::AutoCopyAsync;
-//     using GlobalToSharedCopy = GmemToSmemCopy;
-
-//     using SmemToRegCopyOperation = cute::conditional_t<
-//         IsRoleA, decltype(cutlass::gemm::collective::detail::sm120_rr_smem_copy_selector_A<Element, Element,
-//         true>()), decltype(cutlass::gemm::collective::detail::sm120_rr_smem_copy_selector_B<Element, Element,
-//         true>())>;
-
-//     using SmemToRegCopy = cute::Copy_Atom<SmemToRegCopyOperation, SmemAllocElement>;
-//     using SharedToRegisterCopy = SmemToRegCopy;
-
-//     using RegToSmemCopy = cute::Copy_Atom<cute::AutoVectorizingCopyWithAssumedAlignment<128>, SmemAllocElement>;
-//     using RegisterToSharedCopy = RegToSmemCopy;
-//     using SmemToGmemCopy = cute::AutoCopyAsync;
-//     using SharedToGlobalCopy = SmemToGmemCopy;
-
-//     using SmemElement = SmemAllocElement;
-// };
-// /**
-//  * @brief Helper alias struct for Operand A configuring the SM120 TensorOp Mainloop.
-//  * * @tparam Element Data type of Operand A (Targets FP8).
-//  * @tparam GmemStride Stride configuration in Global Memory.
-//  * @tparam TileShape_MNK The CTA-level tile shape.
-//  * @tparam ThreadCount Number of threads in the CTA.
-//  * @tparam GmemAlignmentBytes Alignment in bytes for Operand A.
-//  * @tparam ClusterShape Threadblock cluster shape.
-//  */
-// template <class Element, class GmemStride, class TileShape_MNK, int ThreadCount, int GmemAlignmentBytes,
-//           class ClusterShape>
-// struct Sm120TensorOpRoleA
-//     : Sm120TensorOpMainloopRole<Element, GmemStride, TileShape_MNK, ThreadCount, GmemAlignmentBytes, ClusterShape,
-//     true>
-// {
-// };
-
-// template <class Element, class GmemStride, class TileShape_MNK, int ThreadCount, int GmemAlignmentBytes,
-//           class ClusterShape>
-// struct Sm120TensorOpRoleB : Sm120TensorOpMainloopRole<Element, GmemStride, TileShape_MNK, ThreadCount,
-//                                                       GmemAlignmentBytes, ClusterShape, false>
-// {
-// };
-
-// /**
-//  * @brief Configures the Epilogue Role (Operand C) for SM120 TensorOp operations.
-//  * Manages accumulator logic, SM120 specific Register-to-Shared (RR) layouts,
-//  * and memory copies back to Global Memory for mixed precision workflows.
-//  * * @tparam Element Input data type (e.g. FP8).
-//  * @tparam ElementC Expected output data type.
-//  * @tparam GmemStride Stride pattern in Global Memory for Operand C.
-//  * @tparam TileShape_MNK CTA-level tile shape <M, N, K>.
-//  * @tparam ThreadCount Thread count assigned to this Role.
-//  * @tparam GmemAlignmentBytes Global memory alignment in bytes for Operand C.
-//  * @tparam ClusterShape Threadblock cluster shape.
-//  */
-// template <class Element, class ElementC, class GmemStride, class TileShape_MNK, int ThreadCount, int
-// GmemAlignmentBytes,
-//           class ClusterShape>
-// struct Sm120TensorOpRoleC
-// {
-//     static_assert(IsSm120TensorOpElement<Element>::value, "SM120 TensorOp path currently targets FP8 inputs.");
-
-//     using ElementInput = Element;
-//     using ElementOutput = ElementC;
-//     using ClusterShape_MNK = ClusterShape;
-//     using Accumulator = float;
-//     using ElementCompute = Accumulator;
-//     using EpilogueElement = Accumulator;
-
-//     using PermTileM = decltype(cute::min(cute::size<0>(TileShape_MNK{}), cute::_128{}));
-//     using PermTileN = decltype(cute::min(cute::size<1>(TileShape_MNK{}), cute::_32{}));
-
-//     using MmaAtom = cute::MMA_Atom<decltype(cute::rr_op_selector_sm120<Element, Element, Accumulator>())>;
-//     using AtomLayout = cute::Layout<cute::Shape<cute::_4, cute::_2, cute::_1>>;
-//     using TiledMma =
-//         decltype(cute::make_tiled_mma(MmaAtom{}, AtomLayout{}, cute::Tile<PermTileM, PermTileN, cute::_32>{}));
-
-//     static constexpr int BlkM = cute::size<0>(TileShape_MNK{});
-//     static constexpr int BlkN = cute::size<1>(TileShape_MNK{});
-//     static constexpr bool IsMnMajor = cutlass::gemm::detail::is_mn_major<GmemStride>();
-//     static constexpr int Padding = SmemPaddingElements<EpilogueElement>::value;
-
-//     using SmemLayoutAtom = cute::conditional_t<
-//         IsMnMajor,
-//         cute::Layout<cute::Shape<cute::Int<BlkM>, cute::Int<BlkN>>, cute::Stride<cute::_1, cute::Int<BlkM +
-//         Padding>>>, cute::Layout<cute::Shape<cute::Int<BlkM>, cute::Int<BlkN>>, cute::Stride<cute::Int<BlkN +
-//         Padding>, cute::_1>>>;
-//     using SmemLayout = SmemLayoutAtom;
-
-//     static constexpr int OutputAlignmentElements =
-//         GmemTiledCopyAlignment<ElementOutput, BlkM, BlkN, ThreadCount, IsMnMajor, GmemAlignmentBytes>::value;
-//     static constexpr int GmemToSmemAlignmentBytes =
-//         GmemTiledCopyAlignment<ElementOutput, BlkM, BlkN, ThreadCount, IsMnMajor, GmemAlignmentBytes>::bytes;
-
-//     using GmemToSmemCopy = cute::AutoCopyAsync;
-//     using SmemToRegCopyOperation = cute::AutoVectorizingCopyWithAssumedAlignment<128>;
-//     using RegToSmemCopyOperation = cute::AutoVectorizingCopyWithAssumedAlignment<128>;
-//     using SmemToRegCopy = cute::Copy_Atom<SmemToRegCopyOperation, EpilogueElement>;
-//     using RegToSmemCopy = cute::Copy_Atom<RegToSmemCopyOperation, EpilogueElement>;
-//     using SmemToGmemCopy = decltype(cutlass::gemm::collective::detail::make_simt_gmem_tiled_copy<
-//                                     VectorizedCopyAtom<ElementOutput, OutputAlignmentElements>, ThreadCount,
-//                                     OutputAlignmentElements, GmemStride, cute::Int<BlkM>, cute::Int<BlkN>>());
-
-//     using GlobalToSharedCopy = GmemToSmemCopy;
-//     using SharedToRegisterCopy = SmemToRegCopy;
-//     using RegisterToSharedCopy = RegToSmemCopy;
-//     using SharedToGlobalCopy = SmemToGmemCopy;
-// };
-
 } // namespace detail
 /**
  * @brief Specialization of the AutoPartitioner policy for the SM100 architecture executing SIMT
@@ -824,89 +663,5 @@ struct AutoPartitioner<cutlass::arch::Sm100, cutlass::arch::OpClassTensorOp, Ele
     using RoleC = detail::Sm100TensorOpRoleC<Element, ElementC, GmemStride, TileShape_MNK, ThreadCount, GmemAlignmentC,
                                              ClusterShape_MNK>;
 };
-// /**
-//  * @brief Specialization of the AutoPartitioner policy for the SM120 architecture executing SIMT kernels.
-//  * Since SIMT execution logic does not drastically differ or require new opcodes on SM120 for basic types,
-//  * it defaults to compiling down using the stable SM80 SIMT Roles.
-//  * * @tparam Element Input data type.
-//  * @tparam GmemStride Global memory stride.
-//  * @tparam TileShape_MNK The CTA-level tile shape.
-//  * @tparam ThreadCount Thread count per CTA.
-//  * @tparam ElementC Output data type.
-//  * @tparam GmemAlignmentA Operand A byte alignment.
-//  * @tparam GmemAlignmentB Operand B byte alignment.
-//  * @tparam GmemAlignmentC Operand C byte alignment.
-//  * @tparam ClusterShape_MNK Threadblock cluster dimension shape.
-//  */
-// template <typename Element, typename GmemStride, typename TileShape_MNK, int ThreadCount, typename ElementC,
-//           int GmemAlignmentA, int GmemAlignmentB, int GmemAlignmentC, typename ClusterShape_MNK>
-// struct AutoPartitioner<cutlass::arch::Sm120, cutlass::arch::OpClassSimt, Element, GmemStride, TileShape_MNK,
-//                        ThreadCount, ElementC, GmemAlignmentA, GmemAlignmentB, GmemAlignmentC, ClusterShape_MNK,
-//                        std::enable_if_t<detail::IsSm100SimtElement<Element>::value>>
-// {
-//     using RoleA = detail::Sm80SimtRoleA<Element, GmemStride, TileShape_MNK, ThreadCount, GmemAlignmentA>;
-//     using RoleB = detail::Sm80SimtRoleB<Element, GmemStride, TileShape_MNK, ThreadCount, GmemAlignmentB>;
-//     using RoleC = detail::Sm80SimtRoleC<Element, ElementC, GmemStride, TileShape_MNK, ThreadCount, GmemAlignmentC>;
-// };
-// /**
-//  * @brief Fallback specialization of the AutoPartitioner policy for the SM120 architecture using Tensor Cores.
-//  * If the data type is standard (e.g., float, half, int8) and natively belongs to SM100 features,
-//  * this SM120 compilation path reuses the highly optimized SM100 TensorOp structures.
-//  * * @tparam Element Input data type (SM100 compatible).
-//  * @tparam GmemStride Global memory stride.
-//  * @tparam TileShape_MNK The CTA-level tile shape.
-//  * @tparam ThreadCount Thread count per CTA.
-//  * @tparam ElementC Output data type.
-//  * @tparam GmemAlignmentA Operand A byte alignment.
-//  * @tparam GmemAlignmentB Operand B byte alignment.
-//  * @tparam GmemAlignmentC Operand C byte alignment.
-//  * @tparam ClusterShape_MNK Threadblock cluster dimension shape.
-//  */
-// template <typename Element, typename GmemStride, typename TileShape_MNK, int ThreadCount, typename ElementC,
-//           int GmemAlignmentA, int GmemAlignmentB, int GmemAlignmentC, typename ClusterShape_MNK>
-// struct AutoPartitioner<cutlass::arch::Sm120, cutlass::arch::OpClassTensorOp, Element, GmemStride, TileShape_MNK,
-//                        ThreadCount, ElementC, GmemAlignmentA, GmemAlignmentB, GmemAlignmentC, ClusterShape_MNK,
-//                        std::enable_if_t<detail::IsSm100TensorOpElement<Element>::value>>
-// {
-//     using RoleA =
-//         detail::Sm100TensorOpRoleA<Element, GmemStride, TileShape_MNK, ThreadCount, GmemAlignmentA,
-//         ClusterShape_MNK>;
-//     using RoleB =
-//         detail::Sm100TensorOpRoleB<Element, GmemStride, TileShape_MNK, ThreadCount, GmemAlignmentB,
-//         ClusterShape_MNK>;
-//     using RoleC = detail::Sm100TensorOpRoleC<Element, ElementC, GmemStride, TileShape_MNK, ThreadCount,
-//     GmemAlignmentC,
-//                                              ClusterShape_MNK>;
-// };
-// /**
-//  * @brief Dedicated specialization of the AutoPartitioner policy for the SM120 architecture using Tensor Cores.
-//  * This specific path is triggered when utilizing data types newly introduced or uniquely optimized
-//  * in SM120 (e.g., FP8 variants like float_e4m3_t). Dispatches to SM120 exclusive role configurations.
-//  * * @tparam Element Input data type (SM120 specific, such as FP8).
-//  * @tparam GmemStride Global memory stride.
-//  * @tparam TileShape_MNK The CTA-level tile shape.
-//  * @tparam ThreadCount Thread count per CTA.
-//  * @tparam ElementC Output data type.
-//  * @tparam GmemAlignmentA Operand A byte alignment.
-//  * @tparam GmemAlignmentB Operand B byte alignment.
-//  * @tparam GmemAlignmentC Operand C byte alignment.
-//  * @tparam ClusterShape_MNK Threadblock cluster dimension shape.
-//  */
-// template <typename Element, typename GmemStride, typename TileShape_MNK, int ThreadCount, typename ElementC,
-//           int GmemAlignmentA, int GmemAlignmentB, int GmemAlignmentC, typename ClusterShape_MNK>
-// struct AutoPartitioner<cutlass::arch::Sm120, cutlass::arch::OpClassTensorOp, Element, GmemStride, TileShape_MNK,
-//                        ThreadCount, ElementC, GmemAlignmentA, GmemAlignmentB, GmemAlignmentC, ClusterShape_MNK,
-//                        std::enable_if_t<detail::IsSm120TensorOpElement<Element>::value>>
-// {
-//     using RoleA =
-//         detail::Sm120TensorOpRoleA<Element, GmemStride, TileShape_MNK, ThreadCount, GmemAlignmentA,
-//         ClusterShape_MNK>;
-//     using RoleB =
-//         detail::Sm120TensorOpRoleB<Element, GmemStride, TileShape_MNK, ThreadCount, GmemAlignmentB,
-//         ClusterShape_MNK>;
-//     using RoleC = detail::Sm120TensorOpRoleC<Element, ElementC, GmemStride, TileShape_MNK, ThreadCount,
-//     GmemAlignmentC,
-//                                              ClusterShape_MNK>;
-// };
 
 } // namespace autopartition

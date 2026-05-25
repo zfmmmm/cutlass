@@ -233,18 +233,7 @@ TEST(AutoPartitionerSm1xxPhase1, StaticSfinaeRoutingAndTopology) {
       autopartition::detail::Sm100TensorOpRoleA<cutlass::half_t, StrideA, TileSm100, 128, 16, Cluster2x1x1>>::value,
       "SM100 TensorOp must route to Sm100TensorOpRoleA.");
 
-  using Sm120Fp8A = typename autopartition::AutoPartitioner<
-      cutlass::arch::Sm120, cutlass::arch::OpClassTensorOp, cutlass::float_e4m3_t,
-      StrideA, TileSm100, 256, float, 16, 16, 16, Cluster2x1x1>::RoleA;
-  static_assert(std::is_same<Sm120Fp8A,
-      autopartition::detail::Sm120TensorOpRoleA<cutlass::float_e4m3_t, StrideA, TileSm100, 256, 16, Cluster2x1x1>>::value,
-      "SM120 FP8 TensorOp must route to Sm120TensorOpRoleA.");
-
   static_assert(Sm100TensorA::UsesTmaLoad, "SM100 16B aligned RoleA should select TMA.");
-  static_assert(std::is_same<typename Sm120Fp8A::ClusterShape_MNK, Cluster2x1x1>::value,
-      "SM120 role must preserve cluster shape.");
-  static_assert(Sm120Fp8A::GmemToSmemAlignmentBytes == 16,
-      "SM120 role must preserve A alignment.");
   static_assert(cute::cosize_v<typename Sm100TensorA::SmemLayout> > 0,
       "SM100 TensorOp A layout must be non-empty.");
 
