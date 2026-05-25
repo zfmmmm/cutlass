@@ -15,12 +15,14 @@
 
 #include <cutlass/arch/arch.h>
 #include <cutlass/arch/mma.h>
+#include <cutlass/epilogue/collective/collective_builder.hpp>
 #include <cutlass/gemm/collective/collective_builder_decl.hpp>
 #include <cutlass/gemm/collective/collective_mma_decl.hpp>
 #include <cutlass/gemm/collective/builders/sm100_common.inl>
 #include <cutlass/gemm/collective/builders/sm100_simt_builder.inl>
 #include <cutlass/gemm/collective/builders/sm90_common.inl>
 #include <cutlass/gemm/gemm.h>
+#include <cutlass/layout/matrix.h>
 #include <cutlass/numeric_types.h>
 
 #include "../auto_partitioner.hpp"
@@ -155,6 +157,13 @@ struct Sm100SmemBankPaddingElements
  */
 template <int GmemAlignmentBytes> struct Sm100UseTma : std::integral_constant<bool, (GmemAlignmentBytes >= 16)>
 {
+};
+
+template <class GmemStride> struct Sm100EpilogueLayoutTag
+{
+    using type = cute::conditional_t<cutlass::gemm::detail::is_mn_major<GmemStride>(),
+                                     cutlass::layout::ColumnMajor,
+                                     cutlass::layout::RowMajor>;
 };
 /**
  * @brief Validates if the chosen tile shape and thread count configuration is natively eligible
@@ -519,58 +528,80 @@ struct Sm100TensorOpRoleC
     static constexpr int BlkM = cute::size<0>(TileShape_MNK{});
     static constexpr int BlkN = cute::size<1>(TileShape_MNK{});
     static constexpr bool IsMnMajor = cutlass::gemm::detail::is_mn_major<GmemStride>();
-    static constexpr int SmemMajorExtent = IsMnMajor ? BlkM : BlkN;
-    static constexpr int Padding = Sm100SmemBankPaddingElements<EpilogueElement, SmemMajorExtent, 128>::value;
 
-    using SmemLayoutAtom = cute::conditional_t<
-        IsMnMajor,
-        cute::Layout<cute::Shape<cute::Int<BlkM>, cute::Int<BlkN>>, cute::Stride<cute::_1, cute::Int<BlkM + Padding>>>,
-        cute::Layout<cute::Shape<cute::Int<BlkM>, cute::Int<BlkN>>, cute::Stride<cute::Int<BlkN + Padding>, cute::_1>>>;
-    using SmemLayout = SmemLayoutAtom;
+    using GmemLayoutTagC = typename Sm100EpilogueLayoutTag<GmemStride>::type;
+    static_assert(GmemAlignmentBytes >= int(sizeof(ElementOutput)),
+                  "SM100 RoleC output alignment must cover at least one element.");
+    static_assert((GmemAlignmentBytes % int(sizeof(ElementOutput))) == 0,
+                  "SM100 RoleC output alignment must be expressed in whole output elements.");
+    static constexpr int AlignmentElements = GmemAlignmentBytes / int(sizeof(ElementOutput));
+    static constexpr int AlignmentBytes = AlignmentElements * int(sizeof(ElementOutput));
+    static constexpr int AlignmentBits = AlignmentBytes * 8;
 
-    static constexpr int OutputPadding = Sm100SmemBankPaddingElements<ElementOutput, SmemMajorExtent, 128>::value;
-    using OutputSmemLayoutAtom =
-        cute::conditional_t<IsMnMajor,
-                            cute::Layout<cute::Shape<cute::Int<BlkM>, cute::Int<BlkN>>,
-                                         cute::Stride<cute::_1, cute::Int<BlkM + OutputPadding>>>,
-                            cute::Layout<cute::Shape<cute::Int<BlkM>, cute::Int<BlkN>>,
-                                         cute::Stride<cute::Int<BlkN + OutputPadding>, cute::_1>>>;
-    using OutputSmemLayout = OutputSmemLayoutAtom;
+    using CollectiveEpilogue = typename cutlass::epilogue::collective::CollectiveBuilder<
+        cutlass::arch::Sm100,
+        cutlass::arch::OpClassTensorOp,
+        TileShape_MNK,
+        ClusterShape_MNK,
+        cutlass::epilogue::collective::EpilogueTileAuto,
+        Accumulator,
+        Accumulator,
+        ElementOutput,
+        GmemLayoutTagC,
+        AlignmentElements,
+        ElementOutput,
+        GmemLayoutTagC,
+        AlignmentElements,
+        cutlass::epilogue::collective::EpilogueScheduleAuto>::CollectiveOp;
+
+    using EpilogueTile = typename CollectiveEpilogue::EpilogueTile;
+    using EpilogueTileShape = decltype(cute::product_each(cute::shape(EpilogueTile{})));
+    using EpilogueModeOrder =
+        cute::conditional_t<IsMnMajor, cute::Step<cute::_2, cute::_1>, cute::Step<cute::_1, cute::_2>>;
+
+    using SmemLayoutAtom = typename CollectiveEpilogue::SmemLayoutAtomC;
+    using SmemLayout = decltype(cute::tile_to_shape(SmemLayoutAtom{}, EpilogueTileShape{}, EpilogueModeOrder{}));
+
+    using OutputSmemLayoutAtom = typename CollectiveEpilogue::SmemLayoutAtomD;
+    using OutputSmemLayout =
+        decltype(cute::tile_to_shape(OutputSmemLayoutAtom{}, EpilogueTileShape{}, EpilogueModeOrder{}));
 
     static constexpr bool UsesTmaLoad = Sm100UseTma<GmemAlignmentBytes>::value;
     static constexpr bool UsesTmaStore = Sm100UseTma<GmemAlignmentBytes>::value;
-    static constexpr int GmemToSmemAlignmentElements =
-        GmemTiledCopyAlignment<ElementOutput, BlkM, BlkN, ThreadCount, IsMnMajor, GmemAlignmentBytes>::value;
-    static constexpr int GmemToSmemAlignmentBytes =
-        GmemTiledCopyAlignment<ElementOutput, BlkM, BlkN, ThreadCount, IsMnMajor, GmemAlignmentBytes>::bytes;
+    static constexpr int GmemToSmemAlignmentElements = AlignmentElements;
+    static constexpr int GmemToSmemAlignmentBytes = AlignmentBytes;
     static constexpr int SmemToGmemAlignmentElements = GmemToSmemAlignmentElements;
     static constexpr int SmemToGmemAlignmentBytes = GmemToSmemAlignmentBytes;
     using GmemAlignmentType = cute::uint_byte_t<GmemToSmemAlignmentBytes>;
 
+    using GmemToSmemCopyOperation = typename CollectiveEpilogue::CopyOpG2S;
     using GmemToSmemTmaCopy = decltype(cute::make_tma_copy(
-        cute::SM90_TMA_LOAD{},
+        GmemToSmemCopyOperation{},
         cute::make_tensor(cute::make_gmem_ptr(static_cast<ElementOutput *>(nullptr)),
                           cute::make_shape(cute::Int<BlkM>{}, cute::Int<BlkN>{}), GmemStride{}),
-        OutputSmemLayout{}, cute::make_shape(cute::Int<BlkM>{}, cute::Int<BlkN>{}), cute::Int<1>{}));
+        SmemLayout{}, EpilogueTile{}, cute::Int<1>{}));
     using GmemToSmemCpAsyncCopy =
         decltype(cutlass::gemm::collective::detail::make_simt_gmem_tiled_copy<
                  cute::Copy_Atom<cute::SM80_CP_ASYNC_CACHEALWAYS_ZFILL<GmemAlignmentType>, ElementOutput>, ThreadCount,
                  GmemToSmemAlignmentElements, GmemStride, cute::Int<BlkM>, cute::Int<BlkN>>());
     using GmemToSmemCopy = cute::conditional_t<UsesTmaLoad, GmemToSmemTmaCopy, GmemToSmemCpAsyncCopy>;
 
-    using TmemToSmemCopyOperation =
-        cute::conditional_t<(BlkM == 64), cute::SM100_TMEM_STORE_16dp256b1x, cute::SM100_TMEM_STORE_32dp32b32x>;
-    using TmemToSmemCopy = cute::Copy_Atom<TmemToSmemCopyOperation, Accumulator>;
-
-    using SmemToRegCopyOperation = cute::AutoVectorizingCopyWithAssumedAlignment<128>;
-    using RegToSmemCopyOperation = cute::AutoVectorizingCopyWithAssumedAlignment<128>;
-    using SmemToRegCopy = cute::Copy_Atom<SmemToRegCopyOperation, EpilogueElement>;
+    using TmemToRegisterCopyOperation = typename CollectiveEpilogue::CopyOpT2R;
+    using TmemToRegisterCopy = TmemToRegisterCopyOperation;
+    using TmemToSmemCopyOperation = TmemToRegisterCopyOperation;
+    using TmemToSmemCopy = TmemToRegisterCopy;
+    using SmemToRegCopyOperation = typename CollectiveEpilogue::CopyOpS2R;
+    using RegToSmemCopyOperation = typename CollectiveEpilogue::CopyOpR2S;
+    using SharedToGlobalCopyOperation = typename CollectiveEpilogue::CopyOpS2G;
+    using RegisterToSharedCopyOperation = RegToSmemCopyOperation;
+    using SharedToRegisterCopyOperation = SmemToRegCopyOperation;
+    using SmemToRegCopy = cute::Copy_Atom<SmemToRegCopyOperation, ElementOutput>;
     using RegToSmemCopy = cute::Copy_Atom<RegToSmemCopyOperation, ElementOutput>;
     using SmemToGmemTmaCopy = decltype(cute::make_tma_copy(
-        cute::SM90_TMA_STORE{},
+        SharedToGlobalCopyOperation{},
         cute::make_tensor(cute::make_gmem_ptr(static_cast<ElementOutput *>(nullptr)),
                           cute::make_shape(cute::Int<BlkM>{}, cute::Int<BlkN>{}), GmemStride{}),
-        OutputSmemLayout{}, cute::make_shape(cute::Int<BlkM>{}, cute::Int<BlkN>{}), cute::Int<1>{}));
+        OutputSmemLayout{}, EpilogueTile{}, cute::Int<1>{}));
     using SmemToGmemVectorCopy = decltype(cutlass::gemm::collective::detail::make_simt_gmem_tiled_copy<
                                           VectorizedCopyAtom<ElementOutput, SmemToGmemAlignmentElements>, ThreadCount,
                                           SmemToGmemAlignmentElements, GmemStride, cute::Int<BlkM>, cute::Int<BlkN>>());
