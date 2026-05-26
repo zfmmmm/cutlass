@@ -1,20 +1,6 @@
-// #include <cuda_runtime.h>
-// #include <cute/tensor.hpp>
-// #include <cute/atom/copy_atom.hpp>
-// #include <cute/algorithm/cooperative_copy.hpp>
-// #include <cute/algorithm/cooperative_gemm.hpp>
-// #include <cute/util/print_tensor.hpp>
-// #include <iostream>
-// #include <type_traits>
-// #include <vector>
-
-// #include "autopartition_production_common.hpp"
-// #include "cutlass/transform/collective/auto_partitioner/auto_partitioner_builder.hpp"
 #include <cuda_runtime.h>
 #include <cute/tensor.hpp>
-//
 #include <cute/atom/copy_atom.hpp>
-//
 #include <cute/algorithm/cooperative_copy.hpp>
 #include <cute/algorithm/cooperative_gemm.hpp>
 #include <cute/util/print_tensor.hpp>
@@ -61,15 +47,15 @@ __global__ void sm80_autopartition_gemm_kernel(InputElement const *ptr_A,
 
     struct SharedStorage
     {
-        cute::array_aligned<InputElement, cute::cosize_v<typename PartA::SmemLayout>>        smemA;
-        cute::array_aligned<InputElement, cute::cosize_v<typename PartB::SmemLayout>>        smemB;
-        cute::array_aligned<OutputElement, cute::cosize_v<typename PartC::OutputSmemLayout>> smemC;
+        cute::array_aligned<InputElement, cute::cosize_v<typename PartA::SmemLayout>> smemA;
+        cute::array_aligned<InputElement, cute::cosize_v<typename PartB::SmemLayout>> smemB;
+        cute::array_aligned<typename PartC::EpilogueElement, cute::cosize_v<typename PartC::SmemLayout>> smemC;
     };
     __shared__ SharedStorage shared;
 
     Tensor sA = make_tensor(make_smem_ptr(shared.smemA.data()), typename PartA::SmemLayout{});
     Tensor sB = make_tensor(make_smem_ptr(shared.smemB.data()), typename PartB::SmemLayout{});
-    Tensor sC = make_tensor(make_smem_ptr(shared.smemC.data()), typename PartC::OutputSmemLayout{});
+    Tensor sC = make_tensor(make_smem_ptr(shared.smemC.data()), typename PartC::SmemLayout{});
 
     typename PartC::TiledMma mma;
     auto                     thr_mma = mma.get_thread_slice(threadIdx.x);
@@ -103,23 +89,40 @@ __global__ void sm80_autopartition_gemm_kernel(InputElement const *ptr_A,
         __syncthreads();
     }
 
-    using ComputeElement                                          = typename PartC::ElementCompute;
-    Tensor                                                   tCrD = make_fragment_like<OutputElement>(tCrC);
-    cutlass::NumericConverter<OutputElement, ComputeElement> convert;
-    CUTE_UNROLL
-    for (int i = 0; i < size(tCrC); ++i) {
-        tCrD(i) = convert(tCrC(i));
-    }
-
-    auto smem_tiled_copy_C =
-        make_tiled_copy_C(Copy_Atom<typename PartC::RegToSmemCopyOperation, OutputElement>{}, thr_mma);
-    auto   smem_thr_copy_C = smem_tiled_copy_C.get_thread_slice(threadIdx.x);
-    Tensor tCsC            = smem_thr_copy_C.partition_D(sC);
-    Tensor tCrD_view       = smem_thr_copy_C.retile_S(tCrD);
-    copy(smem_tiled_copy_C, tCrD_view, tCsC);
+    auto r2s_tiled_copy_C =
+        make_tiled_copy_C(Copy_Atom<typename PartC::RegToSmemCopyOperation, typename PartC::EpilogueElement>{},
+                          thr_mma);
+    auto   r2s_thr_copy_C = r2s_tiled_copy_C.get_thread_slice(threadIdx.x);
+    Tensor tRS_rAcc       = r2s_thr_copy_C.retile_S(tCrC);
+    Tensor tRS_sAcc       = r2s_thr_copy_C.partition_D(sC);
+    copy(r2s_tiled_copy_C, tRS_rAcc, tRS_sAcc);
     __syncthreads();
 
-    cooperative_copy<ThreadCount, PartC::OutputAlignmentBits>(threadIdx.x, sC, gC, typename PartC::SmemToGmemCopy{});
+    auto s2r_tiled_copy_C =
+        make_tiled_copy_C(Copy_Atom<typename PartC::SmemToRegCopyOperation, typename PartC::EpilogueElement>{},
+                          thr_mma);
+    auto   s2r_thr_copy_C = s2r_tiled_copy_C.get_thread_slice(threadIdx.x);
+    Tensor tSR_sAcc       = s2r_thr_copy_C.partition_S(sC);
+    Tensor tSR_gC         = s2r_thr_copy_C.partition_D(gC);
+    Tensor tSR_rAcc       = make_tensor<typename PartC::EpilogueElement>(shape(tSR_sAcc));
+    Tensor tSR_rD         = make_tensor<OutputElement>(shape(tSR_sAcc));
+
+    copy(s2r_tiled_copy_C, tSR_sAcc, tSR_rAcc);
+
+    cutlass::NumericConverter<OutputElement, typename PartC::EpilogueElement> convert;
+    CUTE_UNROLL
+    for (int i = 0; i < size(tSR_rAcc); ++i) {
+        tSR_rD(i) = convert(tSR_rAcc(i));
+    }
+
+    Copy_Atom<cute::AutoVectorizingCopyWithAssumedAlignment<PartC::OutputAlignmentBits>, OutputElement> r2g_atom;
+    CUTE_UNROLL
+    for (int m = 0; m < size<1>(tSR_gC); ++m) {
+        CUTE_UNROLL
+        for (int n = 0; n < size<2>(tSR_gC); ++n) {
+            copy(r2g_atom, tSR_rD(_, m, n), tSR_gC(_, m, n));
+        }
+    }
 }
 
 __global__ void sm80_cp_async_zfill_probe_kernel(float const *in, float *out)
@@ -189,11 +192,13 @@ int main(int argc, char **argv)
     static_assert(PartA::UseLdMatrix && PartB::UseLdMatrix, "SM80 production example must use LDSM.");
     static_assert(PartA::SwizzleBase == 3 && PartB::SwizzleBase == 3,
                   "64x64x64 half tiles must route to Swizzle<3,3,3> shared layouts.");
-    static_assert(!std::is_void<typename PartC::SmemToGmemCopy>::value,
-                  "SM80 epilogue must expose a shared-to-global vectorized store.");
+    static_assert(!std::is_void<typename PartC::RegisterToGlobalCopy>::value,
+                  "SM80 epilogue must expose a register-to-global vectorized store.");
     static_assert(PartC::EpilogueInstructionThreads == 16,
                   "SM80 epilogue writeback must use the 16-thread shared-memory issue group model.");
-    static_assert(cute::cosize_v<typename PartC::OutputSmemLayout>
+    static_assert(std::is_same<typename PartC::EpilogueElement, typename PartC::ElementCompute>::value,
+                  "SM80 production epilogue shared memory must store accumulator elements.");
+    static_assert(cute::cosize_v<typename PartC::SmemLayout>
                       == int(size<0>(TileShape{})) * int(size<1>(TileShape{})),
                   "SM80 production epilogue shared layout must be padding-free.");
 
@@ -207,8 +212,8 @@ int main(int argc, char **argv)
         print_layout(typename PartA::SmemLayout{});
         std::cout << "PartB::SmemLayout\n";
         print_layout(typename PartB::SmemLayout{});
-        std::cout << "PartC::OutputSmemLayout\n";
-        print_layout(typename PartC::OutputSmemLayout{});
+        std::cout << "PartC::SmemLayout\n";
+        print_layout(typename PartC::SmemLayout{});
     }
 
     std::vector<InputElement>  hA(padded_m * padded_k);

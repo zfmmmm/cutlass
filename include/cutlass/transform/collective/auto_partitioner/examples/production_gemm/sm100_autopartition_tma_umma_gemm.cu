@@ -1,25 +1,4 @@
 // clang-format off
-// #include <cstdio>
-// #include <iostream>
-// #include <type_traits>
-
-// #include <thrust/device_vector.h>
-// #include <thrust/host_vector.h>
-
-// #include <cutlass/arch/barrier.h>
-// #include <cutlass/cluster_launch.hpp>
-// #include <cutlass/half.h>
-// #include <cutlass/numeric_conversion.h>
-
-// #include <cute/tensor.hpp>
-// #include <cute/atom/copy_atom.hpp>
-// #include <cute/algorithm/cooperative_copy.hpp>
-// #include <cute/arch/cluster_sm90.hpp>
-// #include <cute/arch/tmem_allocator_sm100.hpp>
-// #include <cute/numeric/integral_constant.hpp>
-
-// #include "autopartition_production_common.hpp"
-// #include "cutlass/transform/collective/auto_partitioner/auto_partitioner_builder.hpp"
 #include <cstdio>
 #include <iostream>
 #include <type_traits>
@@ -100,14 +79,26 @@ static_assert(!std::is_void<typename PartC::RegisterToSharedCopyOperation>::valu
               "RoleC must expose the builder-selected register-to-shared copy.");
 static_assert(!std::is_void<typename PartC::SharedToGlobalCopyOperation>::value,
               "RoleC must expose the builder-selected shared-to-global copy.");
+static_assert(std::is_same<typename PartC::EpilogueElement, typename PartC::ElementCompute>::value,
+              "RoleC accumulator shared-memory path must store compute accumulators.");
+static_assert(cute::cosize_v<typename PartC::SmemLayout> > 0,
+              "SM100 RoleC must expose a concrete accumulator shared-memory layout.");
 static_assert(cute::cosize_v<typename PartC::SharedToGlobalLayout> > 0,
               "SM100 RoleC must expose a concrete output shared-memory layout.");
 
-template <class TypeA, class TypeB, class TypeD, class ASmemLayout, class BSmemLayout, class DSmemLayout>
+template <class TypeA,
+          class TypeB,
+          class TypeAcc,
+          class TypeD,
+          class ASmemLayout,
+          class BSmemLayout,
+          class AccSmemLayout,
+          class DSmemLayout>
 struct SharedStorage
 {
     alignas(128) cute::ArrayEngine<TypeA, cute::cosize_v<ASmemLayout>> A;
     alignas(128) cute::ArrayEngine<TypeB, cute::cosize_v<BSmemLayout>> B;
+    alignas(128) cute::ArrayEngine<TypeAcc, cute::cosize_v<AccSmemLayout>> Acc;
     alignas(128) cute::ArrayEngine<TypeD, cute::cosize_v<DSmemLayout>> D;
 
     alignas(16) cute::uint64_t mma_barrier;
@@ -116,6 +107,10 @@ struct SharedStorage
 
     CUTE_DEVICE constexpr auto tensor_sA() { return cute::make_tensor(cute::make_smem_ptr(A.begin()), ASmemLayout{}); }
     CUTE_DEVICE constexpr auto tensor_sB() { return cute::make_tensor(cute::make_smem_ptr(B.begin()), BSmemLayout{}); }
+    CUTE_DEVICE constexpr auto tensor_sAcc()
+    {
+        return cute::make_tensor(cute::make_smem_ptr(Acc.begin()), AccSmemLayout{});
+    }
     CUTE_DEVICE constexpr auto tensor_sD() { return cute::make_tensor(cute::make_smem_ptr(D.begin()), DSmemLayout{}); }
 };
 
@@ -150,6 +145,7 @@ __global__ void autopartition_sm100_tma_umma_kernel(ATensor                     
     SharedStorage         &shared_storage = *reinterpret_cast<SharedStorage *>(shared_memory);
     Tensor                 tCsA           = shared_storage.tensor_sA();
     Tensor                 tCsB           = shared_storage.tensor_sB();
+    Tensor                 sAcc           = as_position_independent_swizzle_tensor(shared_storage.tensor_sAcc());
     Tensor                 sD             = as_position_independent_swizzle_tensor(shared_storage.tensor_sD());
 
     ThrMMA cta_mma = tiled_mma.get_slice(Int<0>{});
@@ -217,17 +213,32 @@ __global__ void autopartition_sm100_tma_umma_kernel(ATensor                     
         make_tmem_copy(typename PartC::TmemToRegisterCopyOperation{}, tAcc_epi(_, _, _0{}, _0{}));
     ThrCopy thr_t2r_copy = tiled_t2r_copy.get_slice(threadIdx.x);
     Tensor  tTR_tAcc     = thr_t2r_copy.partition_S(tAcc_epi);
-    Tensor  tTR_sD       = thr_t2r_copy.partition_D(sD);
+    Tensor  tTR_sAcc     = thr_t2r_copy.partition_D(sAcc);
 
     using ComputeElement = typename PartC::ElementCompute;
-    Tensor tTR_rAcc      = make_tensor<ComputeElement>(shape(tTR_sD));
-    Tensor tTR_rD        = make_tensor<OutputElement>(shape(tTR_sD));
+    Tensor tTR_rAcc      = make_tensor<ComputeElement>(shape(tTR_sAcc));
+    Tensor tTR_rFusion   = make_tensor<ComputeElement>(shape(tTR_sAcc));
+    Tensor tTR_rD        = make_tensor<OutputElement>(shape(tTR_sAcc));
 
-    TiledCopy tiled_r2s_copy =
+    TiledCopy tiled_acc_r2s_copy =
+        make_tiled_copy_D(Copy_Atom<typename PartC::RegToSmemCopyOperation, typename PartC::EpilogueElement>{},
+                          tiled_t2r_copy);
+    ThrCopy acc_r2s_thr_copy = tiled_acc_r2s_copy.get_slice(threadIdx.x);
+    Tensor  tAS_rAcc         = acc_r2s_thr_copy.retile_S(tTR_rAcc);
+    Tensor  tAS_sAcc         = acc_r2s_thr_copy.partition_D(sAcc);
+
+    TiledCopy tiled_acc_s2r_copy =
+        make_tiled_copy_D(Copy_Atom<typename PartC::SmemToRegCopyOperation, typename PartC::EpilogueElement>{},
+                          tiled_t2r_copy);
+    ThrCopy acc_s2r_thr_copy = tiled_acc_s2r_copy.get_slice(threadIdx.x);
+    Tensor  tSA_sAcc         = acc_s2r_thr_copy.partition_S(sAcc);
+    Tensor  tSA_rFusion      = acc_s2r_thr_copy.retile_D(tTR_rFusion);
+
+    TiledCopy tiled_out_r2s_copy =
         make_tiled_copy_D(Copy_Atom<typename PartC::RegisterToSharedCopyOperation, OutputElement>{}, tiled_t2r_copy);
-    ThrCopy thr_r2s_copy = tiled_r2s_copy.get_slice(threadIdx.x);
-    Tensor  tRS_rD       = thr_r2s_copy.retile_S(tTR_rD);
-    Tensor  tRS_sD       = thr_r2s_copy.partition_D(sD);
+    ThrCopy out_r2s_thr_copy = tiled_out_r2s_copy.get_slice(threadIdx.x);
+    Tensor  tOS_rD           = out_r2s_thr_copy.retile_S(tTR_rD);
+    Tensor  tOS_sD           = out_r2s_thr_copy.partition_D(sD);
 
     ThrCopy thrblk_s2g_copy = tma_store_D.get_slice(Int<0>{});
     Tensor  bSG_sD          = thrblk_s2g_copy.partition_S(sD);
@@ -254,11 +265,17 @@ __global__ void autopartition_sm100_tma_umma_kernel(ATensor                     
 
             if (issue_t2r) {
                 copy(tiled_t2r_copy, tTR_tAcc_mn, tTR_rAcc);
+                copy(tiled_acc_r2s_copy, tAS_rAcc, tAS_sAcc);
+            }
+            __syncthreads();
+
+            if (issue_t2r) {
+                copy(tiled_acc_s2r_copy, tSA_sAcc, tSA_rFusion);
                 CUTE_UNROLL
-                for (int i = 0; i < size(tTR_rAcc); ++i) {
-                    tTR_rD(i) = convert(alpha * tTR_rAcc(i));
+                for (int i = 0; i < size(tTR_rFusion); ++i) {
+                    tTR_rD(i) = convert(alpha * tTR_rFusion(i));
                 }
-                copy(tiled_r2s_copy, tRS_rD, tRS_sD);
+                copy(tiled_out_r2s_copy, tOS_rD, tOS_sD);
             }
 
             tma_store_fence();
@@ -436,9 +453,11 @@ int main(int argc, char **argv)
 
     using Storage    = SharedStorage<Element,
                                      Element,
+                                     typename PartC::EpilogueElement,
                                      OutputElement,
                                      typename PartA::SmemLayout,
                                      typename PartB::SmemLayout,
+                                     typename PartC::SmemLayout,
                                      typename PartC::SharedToGlobalLayout>;
     auto *kernel     = &autopartition_sm100_tma_umma_kernel<Storage,
                                                             decltype(mA_tma),
