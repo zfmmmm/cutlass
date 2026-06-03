@@ -210,15 +210,15 @@ template <class PartA,
           class StrideB,
           class StrideC,
           int ThreadCount>
-__global__ __launch_bounds__(ThreadCount, 4) void sm80_autopartition_gemm_kernel(InputElement const *ptr_A,
-                                                                                 StrideA             stride_A,
-                                                                                 InputElement const *ptr_B,
-                                                                                 StrideB             stride_B,
-                                                                                 OutputElement      *ptr_C,
-                                                                                 StrideC             stride_C,
-                                                                                 int                 padded_m,
-                                                                                 int                 padded_n,
-                                                                                 int                 padded_k)
+__global__ void sm80_autopartition_gemm_kernel(InputElement const *ptr_A,
+                                               StrideA             stride_A,
+                                               InputElement const *ptr_B,
+                                               StrideB             stride_B,
+                                               OutputElement      *ptr_C,
+                                               StrideC             stride_C,
+                                               int                 padded_m,
+                                               int                 padded_n,
+                                               int                 padded_k)
 {
     using bM = decltype(size<0>(typename PartA::SmemLayout{}));
     using bN = decltype(size<0>(typename PartB::SmemLayout{}));
@@ -232,25 +232,17 @@ __global__ __launch_bounds__(ThreadCount, 4) void sm80_autopartition_gemm_kernel
     Tensor gB = local_tile(gB_full, make_tile(bN{}, bK{}), make_coord(blockIdx.y, _));
     Tensor gC = local_tile(gC_full, make_tile(bM{}, bN{}), make_coord(blockIdx.x, blockIdx.y));
 
-    struct MainloopStorage
+    struct SharedStorage
     {
         cute::array_aligned<InputElement, cute::cosize_v<typename PartA::SmemLayout>> smemA;
         cute::array_aligned<InputElement, cute::cosize_v<typename PartB::SmemLayout>> smemB;
-    };
-    struct EpilogueStorage
-    {
         cute::array_aligned<typename PartC::EpilogueElement, cute::cosize_v<typename PartC::SmemLayout>> smemC;
-    };
-    union SharedStorage
-    {
-        MainloopStorage mainloop;
-        EpilogueStorage epilogue;
     };
     __shared__ SharedStorage shared;
 
-    Tensor sA = make_tensor(make_smem_ptr(shared.mainloop.smemA.data()), typename PartA::SmemLayout{});
-    Tensor sB = make_tensor(make_smem_ptr(shared.mainloop.smemB.data()), typename PartB::SmemLayout{});
-    Tensor sC = make_tensor(make_smem_ptr(shared.epilogue.smemC.data()), typename PartC::SmemLayout{});
+    Tensor sA = make_tensor(make_smem_ptr(shared.smemA.data()), typename PartA::SmemLayout{});
+    Tensor sB = make_tensor(make_smem_ptr(shared.smemB.data()), typename PartB::SmemLayout{});
+    Tensor sC = make_tensor(make_smem_ptr(shared.smemC.data()), typename PartC::SmemLayout{});
 
     typename PartC::TiledMma mma;
     auto                     thr_mma = mma.get_thread_slice(threadIdx.x);

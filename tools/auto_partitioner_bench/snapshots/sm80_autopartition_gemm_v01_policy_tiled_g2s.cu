@@ -210,15 +210,15 @@ template <class PartA,
           class StrideB,
           class StrideC,
           int ThreadCount>
-__global__ __launch_bounds__(ThreadCount, 4) void sm80_autopartition_gemm_kernel(InputElement const *ptr_A,
-                                                                                 StrideA             stride_A,
-                                                                                 InputElement const *ptr_B,
-                                                                                 StrideB             stride_B,
-                                                                                 OutputElement      *ptr_C,
-                                                                                 StrideC             stride_C,
-                                                                                 int                 padded_m,
-                                                                                 int                 padded_n,
-                                                                                 int                 padded_k)
+__global__ void sm80_autopartition_gemm_kernel(InputElement const *ptr_A,
+                                               StrideA             stride_A,
+                                               InputElement const *ptr_B,
+                                               StrideB             stride_B,
+                                               OutputElement      *ptr_C,
+                                               StrideC             stride_C,
+                                               int                 padded_m,
+                                               int                 padded_n,
+                                               int                 padded_k)
 {
     using bM = decltype(size<0>(typename PartA::SmemLayout{}));
     using bN = decltype(size<0>(typename PartB::SmemLayout{}));
@@ -232,25 +232,17 @@ __global__ __launch_bounds__(ThreadCount, 4) void sm80_autopartition_gemm_kernel
     Tensor gB = local_tile(gB_full, make_tile(bN{}, bK{}), make_coord(blockIdx.y, _));
     Tensor gC = local_tile(gC_full, make_tile(bM{}, bN{}), make_coord(blockIdx.x, blockIdx.y));
 
-    struct MainloopStorage
+    struct SharedStorage
     {
         cute::array_aligned<InputElement, cute::cosize_v<typename PartA::SmemLayout>> smemA;
         cute::array_aligned<InputElement, cute::cosize_v<typename PartB::SmemLayout>> smemB;
-    };
-    struct EpilogueStorage
-    {
         cute::array_aligned<typename PartC::EpilogueElement, cute::cosize_v<typename PartC::SmemLayout>> smemC;
-    };
-    union SharedStorage
-    {
-        MainloopStorage mainloop;
-        EpilogueStorage epilogue;
     };
     __shared__ SharedStorage shared;
 
-    Tensor sA = make_tensor(make_smem_ptr(shared.mainloop.smemA.data()), typename PartA::SmemLayout{});
-    Tensor sB = make_tensor(make_smem_ptr(shared.mainloop.smemB.data()), typename PartB::SmemLayout{});
-    Tensor sC = make_tensor(make_smem_ptr(shared.epilogue.smemC.data()), typename PartC::SmemLayout{});
+    Tensor sA = make_tensor(make_smem_ptr(shared.smemA.data()), typename PartA::SmemLayout{});
+    Tensor sB = make_tensor(make_smem_ptr(shared.smemB.data()), typename PartB::SmemLayout{});
+    Tensor sC = make_tensor(make_smem_ptr(shared.smemC.data()), typename PartC::SmemLayout{});
 
     typename PartC::TiledMma mma;
     auto                     thr_mma = mma.get_thread_slice(threadIdx.x);
@@ -258,17 +250,16 @@ __global__ __launch_bounds__(ThreadCount, 4) void sm80_autopartition_gemm_kernel
     Tensor                   tCrC    = thr_mma.make_fragment_C(tCgC);
     clear(tCrC);
 
-    typename PartA::GlobalToSharedCopy tiled_copy_A;
-    typename PartB::GlobalToSharedCopy tiled_copy_B;
-    auto                               thr_copy_A = tiled_copy_A.get_thread_slice(threadIdx.x);
-    auto                               thr_copy_B = tiled_copy_B.get_thread_slice(threadIdx.x);
-
     int k_tiles = size<2>(gA);
 #pragma unroll 1
     for (int k_tile = 0; k_tile < k_tiles; ++k_tile) {
         Tensor gA_k = gA(_, _, k_tile);
         Tensor gB_k = gB(_, _, k_tile);
 
+        typename PartA::GlobalToSharedCopy tiled_copy_A;
+        typename PartB::GlobalToSharedCopy tiled_copy_B;
+        auto                               thr_copy_A = tiled_copy_A.get_thread_slice(threadIdx.x);
+        auto                               thr_copy_B = tiled_copy_B.get_thread_slice(threadIdx.x);
         Tensor                             tAgA       = thr_copy_A.partition_S(gA_k);
         Tensor                             tAsA       = thr_copy_A.partition_D(sA);
         Tensor                             tBgB       = thr_copy_B.partition_S(gB_k);
