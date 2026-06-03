@@ -88,3 +88,37 @@ Command: `tools/auto_partitioner_bench/run_gemm_sweep.py --arch sm80 --sizes 256
 
 Artifacts: `build/auto_partitioner_bench/results/sm80_sweep.csv`, `build/auto_partitioner_bench/results/sm80_sweep.png`.
 
+## v07 epilogue_autoselect_contract
+
+- Snapshots:
+  - `sm80_autopartition_gemm_v07_epilogue_autoselect_contract.cu`
+  - `sm80_policy_v07_epilogue_autoselect_contract.hpp`
+- Change from v06:
+  - Added a compile-time SM80 tensorop RoleC epilogue layout selector that scores 48 padding-free shared-memory layout candidates.
+  - The selector models 32 participating threads as two 16-thread shared-memory issue groups, scores bank conflicts and vector alignment, then breaks ties with a generic target row span equal to the issue group transfer size and canonical SM80 swizzle `MBase=3`.
+  - Added RoleC mapping-contract fields and helpers: `SharedToOutputRegisterCopy`, `OutputRegisterToGlobalCopy`, `RegisterToGlobalCopyAtom`, `retile_smem_to_output()`, and `retile_register_to_output()`.
+  - Rewrote the SM80 example epilogue so C writeback is accumulator register -> swizzled shared memory -> output-thread-map register -> converted output register -> output-thread-map global store. The final hand-written atom loop was removed.
+  - Added `tools/auto_partitioner_bench/sm80_epilogue_policy_contract_probe.cu` to compile-check the new RoleC contract.
+- Selected layout for the 64x64x64 half->float example: `Swizzle<3,3,3>`, row elements = 64, minor elements = 16, no padding.
+- Correctness: `build/auto_partitioner_bench/bin/sm80_autopartition_gemm --m=512 --n=512 --k=512 --warmup=2 --iterations=5` gave `max_abs_diff = 3.21865e-06`.
+- Contract probe: `nvcc ... tools/auto_partitioner_bench/sm80_epilogue_policy_contract_probe.cu` passed.
+- Perf command: `tools/auto_partitioner_bench/run_gemm_sweep.py --arch sm80 --sizes 512,1024,2048,4096 --warmup 5 --iterations 20 --skip-reference --plot`
+
+| Size | AutoPartitioner TFLOP/s | Official CUTLASS TFLOP/s | AP / Official |
+| --- | ---: | ---: | ---: |
+| 512 | 31.908 | 25.8868 | 123.26% |
+| 1024 | 39.1625 | 41.7577 | 93.79% |
+| 2048 | 40.0874 | 45.0395 | 89.01% |
+| 4096 | 39.8004 | 26.4427 | 150.52% |
+
+- 2048 long-run check: `build/auto_partitioner_bench/bin/sm80_autopartition_gemm --m=2048 --n=2048 --k=2048 --warmup=20 --iterations=100 --skip-reference` gave `0.420008 ms`, `40.9037 TFLOP/s`.
+- Final NCU 2048 conflict counters:
+
+| Metric | AutoPartitioner v07 | Official CUTLASS |
+| --- | ---: | ---: |
+| `l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum` | 46,199 | 50,371 |
+| `l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum` | 8,375 | 23,645 |
+| `sm__throughput.avg.pct_of_peak_sustained_elapsed` | 45.28% | 47.11% |
+
+- Why it helps: the output-thread-map contract reduces shared-load conflict to official-level, and the row-span/canonical-swizzle selector reduces accumulator shared-store conflict below the official baseline without using padding.
+- Remaining gap: 1024 and 2048 still trail the official baseline in some runs; the remaining bottleneck is likely mainloop pipeline/scheduling rather than epilogue shared-memory conflict.

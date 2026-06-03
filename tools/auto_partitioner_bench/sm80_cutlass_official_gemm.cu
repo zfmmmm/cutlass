@@ -63,17 +63,9 @@ Options parse_options(int argc, char **argv)
     return options;
 }
 
-template <class Element>
-Element from_float(float value)
-{
-    return cutlass::NumericConverter<Element, float>{}(value);
-}
+template <class Element> Element from_float(float value) { return cutlass::NumericConverter<Element, float>{}(value); }
 
-template <class Element>
-float to_float(Element value)
-{
-    return static_cast<float>(value);
-}
+template <class Element> float to_float(Element value) { return static_cast<float>(value); }
 
 template <class Element>
 void fill_a_b_padded(std::vector<Element> &a,
@@ -139,8 +131,7 @@ float max_abs_diff_active(std::vector<float> const &actual,
     return max_diff;
 }
 
-template <class Launch>
-float time_launch_ms(Launch launch, int warmup, int iterations)
+template <class Launch> float time_launch_ms(Launch launch, int warmup, int iterations)
 {
     for (int i = 0; i < warmup; ++i) {
         launch();
@@ -183,22 +174,22 @@ int main(int argc, char **argv)
     using InstructionShape = cutlass::gemm::GemmShape<16, 8, 16>;
     using EpilogueOp       = cutlass::epilogue::thread::LinearCombination<OutputElement, 4, float, float>;
     using CutlassGemm      = cutlass::gemm::device::Gemm<InputElement,
-                                                    Layout,
-                                                    InputElement,
-                                                    Layout,
-                                                    OutputElement,
-                                                    Layout,
-                                                    float,
-                                                    cutlass::arch::OpClassTensorOp,
-                                                    cutlass::arch::Sm80,
-                                                    ThreadblockShape,
-                                                    WarpShape,
-                                                    InstructionShape,
-                                                    EpilogueOp,
-                                                    cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>,
-                                                    3,
-                                                    8,
-                                                    8>;
+                                                         Layout,
+                                                         InputElement,
+                                                         Layout,
+                                                         OutputElement,
+                                                         Layout,
+                                                         float,
+                                                         cutlass::arch::OpClassTensorOp,
+                                                         cutlass::arch::Sm80,
+                                                         ThreadblockShape,
+                                                         WarpShape,
+                                                         InstructionShape,
+                                                         EpilogueOp,
+                                                         cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>,
+                                                         3,
+                                                         8,
+                                                         8>;
 
     Options options  = parse_options(argc, argv);
     int     padded_m = round_up(options.m, 64);
@@ -231,13 +222,9 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    CutlassGemm gemm;
-    typename CutlassGemm::Arguments arguments({padded_m, padded_n, padded_k},
-                                              {dA, padded_k},
-                                              {dB, padded_n},
-                                              {dC, padded_n},
-                                              {dC, padded_n},
-                                              {1.0f, 0.0f});
+    CutlassGemm                     gemm;
+    typename CutlassGemm::Arguments arguments(
+        {padded_m, padded_n, padded_k}, {dA, padded_k}, {dB, padded_n}, {dC, padded_n}, {dC, padded_n}, {1.0f, 0.0f});
 
     cutlass::Status status = gemm.can_implement(arguments);
     if (status != cutlass::Status::kSuccess) {
