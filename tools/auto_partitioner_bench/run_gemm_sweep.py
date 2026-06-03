@@ -3,6 +3,7 @@ import argparse
 import csv
 import os
 import re
+import statistics
 import subprocess
 import sys
 from pathlib import Path
@@ -55,6 +56,22 @@ def run_one(binary, size, args):
         "tflops": float(tflops_match.group(1)),
         "max_abs_diff": float(diff_match.group(1)) if diff_match else 0.0,
         "stdout": output,
+    }
+
+
+def median_summary(results):
+    runtimes = [item["runtime_ms"] for item in results]
+    diffs = [item["max_abs_diff"] for item in results]
+    median_runtime = statistics.median(runtimes)
+    median_tflops = statistics.median([item["tflops"] for item in results])
+    representative = min(results, key=lambda item: abs(item["runtime_ms"] - median_runtime))
+    return {
+        "runtime_ms": median_runtime,
+        "tflops": median_tflops,
+        "max_abs_diff": max(diffs) if diffs else 0.0,
+        "samples_runtime_ms": runtimes,
+        "samples_tflops": [item["tflops"] for item in results],
+        "representative_stdout": representative["stdout"],
     }
 
 
@@ -121,6 +138,7 @@ def main():
     parser.add_argument("--sizes", default="256,512,1024,2048")
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iterations", type=int, default=20)
+    parser.add_argument("--repeat-runs", type=int, default=3)
     parser.add_argument("--skip-reference", action="store_true")
     parser.add_argument("--output", default="")
     parser.add_argument("--plot", action="store_true")
@@ -141,13 +159,27 @@ def main():
     sizes = parse_sizes(args.sizes)
     output = Path(args.output) if args.output else Path("build/auto_partitioner_bench/results") / f"{args.arch}_sweep.csv"
 
+    if args.repeat_runs <= 0:
+        raise ValueError("--repeat-runs must be positive")
+
     rows = []
     for size in sizes:
-        for implementation, binary in binaries:
-            if not binary.exists():
-                raise FileNotFoundError(f"missing binary: {binary}")
-            print(f"running {implementation} {size}x{size}x{size}")
-            result = run_one(binary, size, args)
+        per_impl_results = {implementation: [] for implementation, _ in binaries}
+        for repeat_idx in range(args.repeat_runs):
+            order = binaries if (repeat_idx % 2) == 0 else list(reversed(binaries))
+            for implementation, binary in order:
+                if not binary.exists():
+                    raise FileNotFoundError(f"missing binary: {binary}")
+                print(
+                    f"running {implementation} {size}x{size}x{size} "
+                    f"(sample {repeat_idx + 1}/{args.repeat_runs})"
+                )
+                result = run_one(binary, size, args)
+                per_impl_results[implementation].append(result)
+                print(f"  runtime_ms={result['runtime_ms']:.6g} tflops={result['tflops']:.6g}")
+
+        for implementation, _binary in binaries:
+            summary = median_summary(per_impl_results[implementation])
             rows.append(
                 {
                     "arch": args.arch,
@@ -155,12 +187,20 @@ def main():
                     "m": size,
                     "n": size,
                     "k": size,
-                    "runtime_ms": result["runtime_ms"],
-                    "tflops": result["tflops"],
-                    "max_abs_diff": result["max_abs_diff"],
+                    "runtime_ms": summary["runtime_ms"],
+                    "tflops": summary["tflops"],
+                    "max_abs_diff": summary["max_abs_diff"],
                 }
             )
-            print(f"  runtime_ms={result['runtime_ms']:.6g} tflops={result['tflops']:.6g}")
+            runtime_samples = ",".join(f"{value:.6g}" for value in summary["samples_runtime_ms"])
+            tflops_samples = ",".join(f"{value:.6g}" for value in summary["samples_tflops"])
+            print(
+                f"summary {implementation} {size}x{size}x{size}: "
+                f"median_runtime_ms={summary['runtime_ms']:.6g} "
+                f"median_tflops={summary['tflops']:.6g}"
+            )
+            print(f"  runtime_samples_ms=[{runtime_samples}]")
+            print(f"  tflops_samples=[{tflops_samples}]")
 
     write_csv(output, rows)
     print(f"csv={output}")
