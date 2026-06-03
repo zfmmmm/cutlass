@@ -4,13 +4,200 @@
 #include <cute/algorithm/cooperative_copy.hpp>
 #include <cute/algorithm/cooperative_gemm.hpp>
 #include <cute/util/print_tensor.hpp>
+#include <algorithm>
+#include <cmath>
+#include <cstdlib>
+#include <cstring>
 #include <iostream>
+#include <limits>
+#include <random>
 #include <type_traits>
 #include <vector>
 
-#include "autopartition_production_common.hpp"
+#include "cutlass/numeric_conversion.h"
 #include "cutlass/transform/collective/auto_partitioner/auto_partitioner_builder.hpp"
 using namespace cute;
+
+namespace autopartition::examples::production {
+
+struct GemmOptions
+{
+    int  m             = 512;
+    int  n             = 512;
+    int  k             = 512;
+    int  iterations    = 20;
+    int  warmup        = 5;
+    bool verify        = true;
+    bool print_layouts = false;
+};
+
+inline int round_up(int value, int multiple) { return ((value + multiple - 1) / multiple) * multiple; }
+
+inline bool check_cuda(cudaError_t status, char const *what)
+{
+    if (status != cudaSuccess) {
+        std::cerr << what << ": " << cudaGetErrorString(status) << "\n";
+        return false;
+    }
+    return true;
+}
+
+inline bool parse_int_arg(char const *arg, char const *prefix, int &value)
+{
+    auto n = std::strlen(prefix);
+    if (std::strncmp(arg, prefix, n) != 0) {
+        return false;
+    }
+    value = std::atoi(arg + n);
+    return true;
+}
+
+inline GemmOptions parse_options(int argc, char **argv)
+{
+    GemmOptions options;
+    for (int i = 1; i < argc; ++i) {
+        if (parse_int_arg(argv[i], "--m=", options.m) || parse_int_arg(argv[i], "--n=", options.n)
+            || parse_int_arg(argv[i], "--k=", options.k) || parse_int_arg(argv[i], "--iterations=", options.iterations)
+            || parse_int_arg(argv[i], "--warmup=", options.warmup)) {
+            continue;
+        }
+        if (std::strcmp(argv[i], "--skip-reference") == 0) {
+            options.verify = false;
+            continue;
+        }
+        if (std::strcmp(argv[i], "--print-layouts") == 0) {
+            options.print_layouts = true;
+            continue;
+        }
+    }
+    return options;
+}
+
+inline void print_options(char const *name, GemmOptions const &options, int padded_m, int padded_n, int padded_k)
+{
+    std::cout << name << "\n"
+              << "  logical_mnk = " << options.m << "x" << options.n << "x" << options.k << "\n"
+              << "  padded_mnk  = " << padded_m << "x" << padded_n << "x" << padded_k << "\n"
+              << "  warmup/iters = " << options.warmup << "/" << options.iterations << "\n";
+}
+
+template <class Element>
+inline Element from_float(float value)
+{
+    return cutlass::NumericConverter<Element, float>{}(value);
+}
+
+template <class Element>
+inline float to_float(Element value)
+{
+    return static_cast<float>(value);
+}
+
+template <class Element>
+void fill_a_b_padded(std::vector<Element> &a,
+                     std::vector<Element> &b,
+                     int                   m,
+                     int                   n,
+                     int                   k,
+                     int                   padded_m,
+                     int                   padded_n,
+                     int                   padded_k)
+{
+    std::mt19937                          rng(20260517);
+    std::uniform_real_distribution<float> dist(-0.25f, 0.25f);
+
+    std::fill(a.begin(), a.end(), Element{});
+    std::fill(b.begin(), b.end(), Element{});
+    for (int row = 0; row < m; ++row) {
+        for (int col = 0; col < k; ++col) {
+            a[row * padded_k + col] = from_float<Element>(dist(rng));
+        }
+    }
+    for (int row = 0; row < n; ++row) {
+        for (int kk = 0; kk < k; ++kk) {
+            b[row + kk * padded_n] = from_float<Element>(dist(rng));
+        }
+    }
+}
+
+template <class ElementA, class ElementB>
+void reference_gemm_abt(std::vector<ElementA> const &a,
+                        std::vector<ElementB> const &b,
+                        std::vector<float>          &c,
+                        int                          m,
+                        int                          n,
+                        int                          k,
+                        int                          padded_k,
+                        int                          padded_n)
+{
+    std::fill(c.begin(), c.end(), 0.0f);
+    for (int row = 0; row < m; ++row) {
+        for (int col = 0; col < n; ++col) {
+            float acc = 0.0f;
+            for (int kk = 0; kk < k; ++kk) {
+                acc += to_float(a[row * padded_k + kk]) * to_float(b[col + kk * padded_n]);
+            }
+            c[row * n + col] = acc;
+        }
+    }
+}
+
+template <class ElementC>
+float max_abs_diff_active(std::vector<ElementC> const &actual,
+                          std::vector<float> const    &reference,
+                          int                          m,
+                          int                          n,
+                          int                          padded_n)
+{
+    float max_diff = 0.0f;
+    for (int row = 0; row < m; ++row) {
+        for (int col = 0; col < n; ++col) {
+            max_diff = std::max(max_diff, std::abs(to_float(actual[row * padded_n + col]) - reference[row * n + col]));
+        }
+    }
+    return max_diff;
+}
+
+template <class Launch>
+float time_launch_ms(Launch launch, int warmup, int iterations)
+{
+    for (int i = 0; i < warmup; ++i) {
+        launch();
+    }
+    cudaDeviceSynchronize();
+
+    cudaEvent_t start{};
+    cudaEvent_t stop{};
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    cudaEventRecord(start);
+    for (int i = 0; i < iterations; ++i) {
+        launch();
+    }
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+
+    float elapsed_ms = 0.0f;
+    cudaEventElapsedTime(&elapsed_ms, start, stop);
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
+    return elapsed_ms / float(iterations);
+}
+
+inline double tflops(int m, int n, int k, float ms)
+{
+    return (2.0 * double(m) * double(n) * double(k)) / (double(ms) * 1.0e-3) / 1.0e12;
+}
+
+inline void print_ncu_hint(char const *binary, char const *filter = "")
+{
+    std::cout << "NCU bank-conflict probe:\n"
+              << "  ncu --metrics "
+              << "l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum,"
+              << "l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum " << binary << " " << filter << "\n";
+}
+
+} // namespace autopartition::examples::production
 
 namespace autopartition_sm80_production {
 
@@ -45,17 +232,31 @@ __global__ void sm80_autopartition_gemm_kernel(InputElement const *ptr_A,
     Tensor gB = local_tile(gB_full, make_tile(bN{}, bK{}), make_coord(blockIdx.y, _));
     Tensor gC = local_tile(gC_full, make_tile(bM{}, bN{}), make_coord(blockIdx.x, blockIdx.y));
 
-    struct SharedStorage
+    static constexpr int MainloopStages = 3;
+
+    struct MainloopStorage
     {
-        cute::array_aligned<InputElement, cute::cosize_v<typename PartA::SmemLayout>> smemA;
-        cute::array_aligned<InputElement, cute::cosize_v<typename PartB::SmemLayout>> smemB;
+        cute::array_aligned<InputElement, cute::cosize_v<typename PartA::SmemLayout>> smemA[MainloopStages];
+        cute::array_aligned<InputElement, cute::cosize_v<typename PartB::SmemLayout>> smemB[MainloopStages];
+    };
+    struct EpilogueStorage
+    {
         cute::array_aligned<typename PartC::EpilogueElement, cute::cosize_v<typename PartC::SmemLayout>> smemC;
+    };
+    union SharedStorage
+    {
+        MainloopStorage mainloop;
+        EpilogueStorage epilogue;
     };
     __shared__ SharedStorage shared;
 
-    Tensor sA = make_tensor(make_smem_ptr(shared.smemA.data()), typename PartA::SmemLayout{});
-    Tensor sB = make_tensor(make_smem_ptr(shared.smemB.data()), typename PartB::SmemLayout{});
-    Tensor sC = make_tensor(make_smem_ptr(shared.smemC.data()), typename PartC::SmemLayout{});
+    Tensor sA0 = make_tensor(make_smem_ptr(shared.mainloop.smemA[0].data()), typename PartA::SmemLayout{});
+    Tensor sA1 = make_tensor(make_smem_ptr(shared.mainloop.smemA[1].data()), typename PartA::SmemLayout{});
+    Tensor sA2 = make_tensor(make_smem_ptr(shared.mainloop.smemA[2].data()), typename PartA::SmemLayout{});
+    Tensor sB0 = make_tensor(make_smem_ptr(shared.mainloop.smemB[0].data()), typename PartB::SmemLayout{});
+    Tensor sB1 = make_tensor(make_smem_ptr(shared.mainloop.smemB[1].data()), typename PartB::SmemLayout{});
+    Tensor sB2 = make_tensor(make_smem_ptr(shared.mainloop.smemB[2].data()), typename PartB::SmemLayout{});
+    Tensor sC = make_tensor(make_smem_ptr(shared.epilogue.smemC.data()), typename PartC::SmemLayout{});
 
     typename PartC::TiledMma mma;
     auto                     thr_mma = mma.get_thread_slice(threadIdx.x);
@@ -63,30 +264,104 @@ __global__ void sm80_autopartition_gemm_kernel(InputElement const *ptr_A,
     Tensor                   tCrC    = thr_mma.make_fragment_C(tCgC);
     clear(tCrC);
 
-    int k_tiles = size<2>(gA);
-#pragma unroll 1
-    for (int k_tile = 0; k_tile < k_tiles; ++k_tile) {
+    auto copy_tile_to_stage = [&](int k_tile, int stage) {
         Tensor gA_k = gA(_, _, k_tile);
         Tensor gB_k = gB(_, _, k_tile);
 
-        cooperative_copy<ThreadCount, PartA::GmemToSmemAlignmentBytes * 8>(
-            threadIdx.x, gA_k, sA, typename PartA::GmemToSmemCopy{});
-        cooperative_copy<ThreadCount, PartB::GmemToSmemAlignmentBytes * 8>(
-            threadIdx.x, gB_k, sB, typename PartB::GmemToSmemCopy{});
+        if (stage == 0) {
+            cooperative_copy<ThreadCount, PartA::GmemToSmemAlignmentBytes * 8>(
+                threadIdx.x, gA_k, sA0, typename PartA::GmemToSmemCopy{});
+            cooperative_copy<ThreadCount, PartB::GmemToSmemAlignmentBytes * 8>(
+                threadIdx.x, gB_k, sB0, typename PartB::GmemToSmemCopy{});
+        }
+        else if (stage == 1) {
+            cooperative_copy<ThreadCount, PartA::GmemToSmemAlignmentBytes * 8>(
+                threadIdx.x, gA_k, sA1, typename PartA::GmemToSmemCopy{});
+            cooperative_copy<ThreadCount, PartB::GmemToSmemAlignmentBytes * 8>(
+                threadIdx.x, gB_k, sB1, typename PartB::GmemToSmemCopy{});
+        }
+        else {
+            cooperative_copy<ThreadCount, PartA::GmemToSmemAlignmentBytes * 8>(
+                threadIdx.x, gA_k, sA2, typename PartA::GmemToSmemCopy{});
+            cooperative_copy<ThreadCount, PartB::GmemToSmemAlignmentBytes * 8>(
+                threadIdx.x, gB_k, sB2, typename PartB::GmemToSmemCopy{});
+        }
         cp_async_fence();
-        cp_async_wait<0>();
+    };
+
+    auto wait_for_stage = [](int future_tiles) {
+        if (future_tiles >= 2) {
+            cp_async_wait<2>();
+        }
+        else if (future_tiles == 1) {
+            cp_async_wait<1>();
+        }
+        else {
+            cp_async_wait<0>();
+        }
+    };
+
+    auto gemm_stage = [&](int stage) {
+        if (stage == 0) {
+            cooperative_gemm(threadIdx.x,
+                             mma,
+                             sA0,
+                             sB0,
+                             tCrC,
+                             identity{},
+                             identity{},
+                             typename PartA::SmemToRegCopyOperation{},
+                             typename PartB::SmemToRegCopyOperation{});
+        }
+        else if (stage == 1) {
+            cooperative_gemm(threadIdx.x,
+                             mma,
+                             sA1,
+                             sB1,
+                             tCrC,
+                             identity{},
+                             identity{},
+                             typename PartA::SmemToRegCopyOperation{},
+                             typename PartB::SmemToRegCopyOperation{});
+        }
+        else {
+            cooperative_gemm(threadIdx.x,
+                             mma,
+                             sA2,
+                             sB2,
+                             tCrC,
+                             identity{},
+                             identity{},
+                             typename PartA::SmemToRegCopyOperation{},
+                             typename PartB::SmemToRegCopyOperation{});
+        }
+    };
+
+    int k_tiles       = size<2>(gA);
+    int preload_tiles = k_tiles < MainloopStages ? k_tiles : MainloopStages;
+
+#pragma unroll
+    for (int preload = 0; preload < MainloopStages; ++preload) {
+        if (preload < preload_tiles) {
+            copy_tile_to_stage(preload, preload);
+        }
+    }
+
+#pragma unroll 1
+    for (int k_tile = 0; k_tile < k_tiles; ++k_tile) {
+        int stage        = k_tile % MainloopStages;
+        int future_tiles = k_tiles - k_tile - 1;
+
+        wait_for_stage(future_tiles);
         __syncthreads();
 
-        cooperative_gemm(threadIdx.x,
-                         mma,
-                         sA,
-                         sB,
-                         tCrC,
-                         identity{},
-                         identity{},
-                         typename PartA::SmemToRegCopyOperation{},
-                         typename PartB::SmemToRegCopyOperation{});
+        gemm_stage(stage);
         __syncthreads();
+
+        int next_tile = k_tile + MainloopStages;
+        if (next_tile < k_tiles) {
+            copy_tile_to_stage(next_tile, stage);
+        }
     }
 
     auto r2s_tiled_copy_C =

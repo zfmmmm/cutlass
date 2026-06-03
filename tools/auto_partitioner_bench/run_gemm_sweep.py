@@ -1,0 +1,172 @@
+#!/usr/bin/env python3
+import argparse
+import csv
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+
+TFLOPS_RE = re.compile(r"tflops\s*=\s*([0-9.+\-eE]+)")
+RUNTIME_RE = re.compile(r"runtime_ms\s*=\s*([0-9.+\-eE]+)")
+DIFF_RE = re.compile(r"max_abs_(?:diff|error)\s*=\s*([0-9.+\-eE]+)")
+
+
+def parse_sizes(text):
+    sizes = []
+    for item in text.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        sizes.append(int(item))
+    if not sizes:
+        raise ValueError("size list is empty")
+    return sizes
+
+
+def run_one(binary, size, args):
+    cmd = [
+        str(binary),
+        f"--m={size}",
+        f"--n={size}",
+        f"--k={size}",
+        f"--warmup={args.warmup}",
+        f"--iterations={args.iterations}",
+    ]
+    if args.skip_reference:
+        cmd.append("--skip-reference")
+
+    completed = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    output = completed.stdout
+    if completed.returncode != 0:
+        sys.stderr.write(output)
+        raise RuntimeError(f"{binary.name} failed for {size}x{size}x{size} with exit code {completed.returncode}")
+
+    tflops_match = TFLOPS_RE.search(output)
+    runtime_match = RUNTIME_RE.search(output)
+    diff_match = DIFF_RE.search(output)
+    if not tflops_match or not runtime_match:
+        sys.stderr.write(output)
+        raise RuntimeError(f"could not parse runtime/tflops from {binary.name}")
+
+    return {
+        "runtime_ms": float(runtime_match.group(1)),
+        "tflops": float(tflops_match.group(1)),
+        "max_abs_diff": float(diff_match.group(1)) if diff_match else 0.0,
+        "stdout": output,
+    }
+
+
+def write_csv(path, rows):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=[
+                "arch",
+                "implementation",
+                "m",
+                "n",
+                "k",
+                "runtime_ms",
+                "tflops",
+                "max_abs_diff",
+            ],
+        )
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+
+
+def plot_csv(csv_path, png_path):
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("matplotlib is not installed; CSV was written, plot skipped.")
+        return
+
+    rows = []
+    with csv_path.open() as f:
+        for row in csv.DictReader(f):
+            row["m"] = int(row["m"])
+            row["tflops"] = float(row["tflops"])
+            rows.append(row)
+
+    grouped = {}
+    for row in rows:
+        grouped.setdefault(row["implementation"], []).append(row)
+
+    fig, ax = plt.subplots(figsize=(8.0, 4.8))
+    for name, data in sorted(grouped.items()):
+        data = sorted(data, key=lambda item: item["m"])
+        ax.plot([item["m"] for item in data], [item["tflops"] for item in data], marker="o", label=name)
+
+    arch = rows[0]["arch"] if rows else "gemm"
+    ax.set_title(f"{arch.upper()} GEMM Throughput")
+    ax.set_xlabel("Square GEMM size M=N=K")
+    ax.set_ylabel("TFLOP/s")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    fig.tight_layout()
+    png_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(png_path, dpi=180)
+    print(f"plot_png={png_path}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Sweep AutoPartitioner and official CUTLASS GEMM binaries.")
+    parser.add_argument("--arch", choices=["sm80", "sm100"], required=True)
+    parser.add_argument("--bin-dir", default="build/auto_partitioner_bench/bin")
+    parser.add_argument("--sizes", default="256,512,1024,2048")
+    parser.add_argument("--warmup", type=int, default=5)
+    parser.add_argument("--iterations", type=int, default=20)
+    parser.add_argument("--skip-reference", action="store_true")
+    parser.add_argument("--output", default="")
+    parser.add_argument("--plot", action="store_true")
+    args = parser.parse_args()
+
+    bin_dir = Path(args.bin_dir)
+    if args.arch == "sm80":
+        binaries = [
+            ("autopartitioner", bin_dir / "sm80_autopartition_gemm"),
+            ("official_cutlass", bin_dir / "sm80_cutlass_official_gemm"),
+        ]
+    else:
+        binaries = [
+            ("autopartitioner", bin_dir / "sm100_autopartition_tma_umma_gemm"),
+            ("official_cutlass", bin_dir / "sm100_cutlass_official_tma_umma_gemm"),
+        ]
+
+    sizes = parse_sizes(args.sizes)
+    output = Path(args.output) if args.output else Path("build/auto_partitioner_bench/results") / f"{args.arch}_sweep.csv"
+
+    rows = []
+    for size in sizes:
+        for implementation, binary in binaries:
+            if not binary.exists():
+                raise FileNotFoundError(f"missing binary: {binary}")
+            print(f"running {implementation} {size}x{size}x{size}")
+            result = run_one(binary, size, args)
+            rows.append(
+                {
+                    "arch": args.arch,
+                    "implementation": implementation,
+                    "m": size,
+                    "n": size,
+                    "k": size,
+                    "runtime_ms": result["runtime_ms"],
+                    "tflops": result["tflops"],
+                    "max_abs_diff": result["max_abs_diff"],
+                }
+            )
+            print(f"  runtime_ms={result['runtime_ms']:.6g} tflops={result['tflops']:.6g}")
+
+    write_csv(output, rows)
+    print(f"csv={output}")
+    if args.plot:
+        plot_csv(output, output.with_suffix(".png"))
+
+
+if __name__ == "__main__":
+    main()

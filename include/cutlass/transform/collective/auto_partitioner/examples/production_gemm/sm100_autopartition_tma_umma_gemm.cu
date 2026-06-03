@@ -1,7 +1,12 @@
 // clang-format off
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <type_traits>
+#include <vector>
 
 #include <thrust/device_vector.h>
 #include <thrust/host_vector.h>
@@ -18,9 +23,103 @@
 #include <cute/arch/tmem_allocator_sm100.hpp>
 #include <cute/numeric/integral_constant.hpp>
 
-#include "autopartition_production_common.hpp"
 #include "cutlass/transform/collective/auto_partitioner/auto_partitioner_builder.hpp"
 // clang-format on
+
+namespace autopartition::examples::production {
+
+struct GemmOptions
+{
+    int  m             = 512;
+    int  n             = 512;
+    int  k             = 512;
+    int  iterations    = 20;
+    int  warmup        = 5;
+    bool verify        = true;
+    bool print_layouts = false;
+};
+
+inline int round_up(int value, int multiple) { return ((value + multiple - 1) / multiple) * multiple; }
+
+inline bool check_cuda(cudaError_t status, char const *what)
+{
+    if (status != cudaSuccess) {
+        std::cerr << what << ": " << cudaGetErrorString(status) << "\n";
+        return false;
+    }
+    return true;
+}
+
+inline bool parse_int_arg(char const *arg, char const *prefix, int &value)
+{
+    auto n = std::strlen(prefix);
+    if (std::strncmp(arg, prefix, n) != 0) {
+        return false;
+    }
+    value = std::atoi(arg + n);
+    return true;
+}
+
+inline void print_options(char const *name, GemmOptions const &options, int padded_m, int padded_n, int padded_k)
+{
+    std::cout << name << "\n"
+              << "  logical_mnk = " << options.m << "x" << options.n << "x" << options.k << "\n"
+              << "  padded_mnk  = " << padded_m << "x" << padded_n << "x" << padded_k << "\n"
+              << "  warmup/iters = " << options.warmup << "/" << options.iterations << "\n";
+}
+
+template <class Element>
+inline Element from_float(float value)
+{
+    return cutlass::NumericConverter<Element, float>{}(value);
+}
+
+template <class Element>
+inline float to_float(Element value)
+{
+    return static_cast<float>(value);
+}
+
+template <class Launch>
+float time_launch_ms(Launch launch, int warmup, int iterations)
+{
+    for (int i = 0; i < warmup; ++i) {
+        launch();
+    }
+    cudaDeviceSynchronize();
+
+    cudaEvent_t start{};
+    cudaEvent_t stop{};
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    cudaEventRecord(start);
+    for (int i = 0; i < iterations; ++i) {
+        launch();
+    }
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+
+    float elapsed_ms = 0.0f;
+    cudaEventElapsedTime(&elapsed_ms, start, stop);
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
+    return elapsed_ms / float(iterations);
+}
+
+inline double tflops(int m, int n, int k, float ms)
+{
+    return (2.0 * double(m) * double(n) * double(k)) / (double(ms) * 1.0e-3) / 1.0e12;
+}
+
+inline void print_ncu_hint(char const *binary, char const *filter = "")
+{
+    std::cout << "NCU bank-conflict probe:\n"
+              << "  ncu --metrics "
+              << "l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum,"
+              << "l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum " << binary << " " << filter << "\n";
+}
+
+} // namespace autopartition::examples::production
 
 namespace autopartition_sm100_production {
 
