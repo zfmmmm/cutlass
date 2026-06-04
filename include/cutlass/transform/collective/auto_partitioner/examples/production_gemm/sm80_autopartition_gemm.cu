@@ -16,6 +16,7 @@
 
 #include "cutlass/numeric_conversion.h"
 #include "cutlass/transform/collective/auto_partitioner/auto_partitioner_builder.hpp"
+#include "tools/auto_partitioner_bench/sm80_benchmark_common.hpp"
 using namespace cute;
 
 namespace autopartition::examples::production {
@@ -345,7 +346,7 @@ int main(int argc, char **argv)
     using namespace autopartition::examples::production;
     using namespace autopartition_sm80_production;
 
-    GemmOptions   options     = parse_options(argc, argv);
+    autopartition_bench::GemmOptions options = autopartition_bench::parse_options(argc, argv);
     constexpr int ThreadCount = 128;
     using InputElement        = cutlass::half_t;
     using OutputElement       = float;
@@ -402,10 +403,15 @@ int main(int argc, char **argv)
                       == int(size<0>(TileShape{})) * int(size<1>(TileShape{})),
                   "SM80 production epilogue shared layout must be padding-free.");
 
-    int padded_m = round_up(options.m, int(size<0>(TileShape{})));
-    int padded_n = round_up(options.n, int(size<1>(TileShape{})));
-    int padded_k = round_up(options.k, int(size<2>(TileShape{})));
-    print_options("SM80 AutoPartitioner cp.async/LDSM/mma.sync GEMM", options, padded_m, padded_n, padded_k);
+    int padded_m = autopartition_bench::round_up(options.m, int(size<0>(TileShape{})));
+    int padded_n = autopartition_bench::round_up(options.n, int(size<1>(TileShape{})));
+    int padded_k = autopartition_bench::round_up(options.k, int(size<2>(TileShape{})));
+    autopartition_bench::print_options("SM80 AutoPartitioner cp.async/LDSM/mma.sync GEMM", options, padded_m, padded_n, padded_k);
+    std::cout << "  threadblock = 64x64x64\n"
+              << "  warp        = autopartitioner\n"
+              << "  instruction = 16x8x16\n"
+              << "  stages      = 1\n"
+              << "  alignments  = A8 / B8\n";
 
     if (options.print_layouts) {
         std::cout << "PartA::SmemLayout\n";
@@ -428,26 +434,29 @@ int main(int argc, char **argv)
     std::vector<InputElement>  hB(padded_n * padded_k);
     std::vector<OutputElement> hC(padded_m * padded_n, OutputElement{});
     std::vector<float>         hRef(options.m * options.n);
-    fill_a_b_padded(hA, hB, options.m, options.n, options.k, padded_m, padded_n, padded_k);
+    autopartition_bench::fill_a_b_padded(hA, hB, options.m, options.n, options.k, padded_m, padded_n, padded_k);
+    autopartition_bench::print_hashes(autopartition_bench::vector_hash(hA), autopartition_bench::vector_hash(hB));
     if (options.verify) {
-        reference_gemm_abt(hA, hB, hRef, options.m, options.n, options.k, padded_k, padded_n);
+        autopartition_bench::reference_gemm_kn(hA, hB, hRef, options.m, options.n, options.k, padded_n, padded_k);
     }
 
     InputElement  *dA = nullptr;
     InputElement  *dB = nullptr;
     OutputElement *dC = nullptr;
-    if (!check_cuda(cudaMalloc(&dA, hA.size() * sizeof(InputElement)), "cudaMalloc(A)")
-        || !check_cuda(cudaMalloc(&dB, hB.size() * sizeof(InputElement)), "cudaMalloc(B)")
-        || !check_cuda(cudaMalloc(&dC, hC.size() * sizeof(OutputElement)), "cudaMalloc(C)")
-        || !check_cuda(cudaMemcpy(dA, hA.data(), hA.size() * sizeof(InputElement), cudaMemcpyHostToDevice), "copy A")
-        || !check_cuda(cudaMemcpy(dB, hB.data(), hB.size() * sizeof(InputElement), cudaMemcpyHostToDevice), "copy B")
-        || !check_cuda(cudaMemset(dC, 0, hC.size() * sizeof(OutputElement)), "zero C")) {
+    if (!autopartition_bench::check_cuda(cudaMalloc(&dA, hA.size() * sizeof(InputElement)), "cudaMalloc(A)")
+        || !autopartition_bench::check_cuda(cudaMalloc(&dB, hB.size() * sizeof(InputElement)), "cudaMalloc(B)")
+        || !autopartition_bench::check_cuda(cudaMalloc(&dC, hC.size() * sizeof(OutputElement)), "cudaMalloc(C)")
+        || !autopartition_bench::check_cuda(
+            cudaMemcpy(dA, hA.data(), hA.size() * sizeof(InputElement), cudaMemcpyHostToDevice), "copy A")
+        || !autopartition_bench::check_cuda(
+            cudaMemcpy(dB, hB.data(), hB.size() * sizeof(InputElement), cudaMemcpyHostToDevice), "copy B")
+        || !autopartition_bench::check_cuda(cudaMemset(dC, 0, hC.size() * sizeof(OutputElement)), "zero C")) {
         return 1;
     }
 
     dim3 grid(padded_m / int(size<0>(TileShape{})), padded_n / int(size<1>(TileShape{})));
     dim3 block(ThreadCount);
-    auto launch = [&]() {
+    auto launch = [&]() -> bool {
         sm80_autopartition_gemm_kernel<PartA,
                                        PartB,
                                        PartC,
@@ -465,21 +474,31 @@ int main(int argc, char **argv)
                                                                      padded_m,
                                                                      padded_n,
                                                                      padded_k);
+        return autopartition_bench::check_cuda(cudaGetLastError(), "launch SM80 AutoPartitioner GEMM");
     };
 
-    launch();
-    if (!check_cuda(cudaDeviceSynchronize(), "SM80 GEMM kernel")) {
+    if (!launch()) {
         return 1;
     }
-    if (!check_cuda(cudaMemcpy(hC.data(), dC, hC.size() * sizeof(OutputElement), cudaMemcpyDeviceToHost), "copy C")) {
+    if (!autopartition_bench::check_cuda(cudaDeviceSynchronize(), "SM80 GEMM kernel")) {
+        return 1;
+    }
+    if (!autopartition_bench::check_cuda(
+            cudaMemcpy(hC.data(), dC, hC.size() * sizeof(OutputElement), cudaMemcpyDeviceToHost), "copy C")) {
         return 1;
     }
 
-    float max_diff = options.verify ? max_abs_diff_active(hC, hRef, options.m, options.n, padded_n) : 0.0f;
-    float ms       = time_launch_ms(launch, options.warmup, options.iterations);
+    autopartition_bench::OutputStats stats = autopartition_bench::output_stats_active(hC, options.m, options.n, padded_n);
+    float max_diff =
+        options.verify ? autopartition_bench::max_abs_diff_active(hC, hRef, options.m, options.n, padded_n) : 0.0f;
+    float ms = 0.0f;
+    if (!autopartition_bench::time_launch_ms(launch, options.warmup, options.iterations, ms)) {
+        return 1;
+    }
+    autopartition_bench::print_output_stats(stats);
     std::cout << "  max_abs_diff = " << max_diff << "\n"
               << "  runtime_ms   = " << ms << "\n"
-              << "  tflops       = " << tflops(options.m, options.n, options.k, ms) << "\n";
+              << "  tflops       = " << autopartition_bench::tflops(options.m, options.n, options.k, ms) << "\n";
 
     float *dProbeIn = nullptr, *dProbeOut = nullptr;
     float  hProbeIn  = std::numeric_limits<float>::quiet_NaN();

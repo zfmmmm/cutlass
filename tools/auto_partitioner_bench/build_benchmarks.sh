@@ -13,6 +13,7 @@ common_flags=(
   -std=c++17
   -O3
   -lineinfo
+  -I"${repo_root}"
   -I"${repo_root}/include"
   -I"${repo_root}/build/include"
   -I"${repo_root}/tools/util/include"
