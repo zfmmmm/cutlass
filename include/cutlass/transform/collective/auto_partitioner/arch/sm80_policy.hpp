@@ -965,6 +965,7 @@ struct Sm80TensorOpRoleB
 {
 };
 // N 必须是正数且为 2 的幂
+//递归计算以 2 为底的对数
 template <int N> struct Sm80StaticLog2
 {
     static_assert(N > 0, "Sm80StaticLog2 requires positive N.");
@@ -991,17 +992,19 @@ constexpr bool sm80_epilogue_is_pow2(int value) { return value > 0 && ((value & 
 
 constexpr int sm80_epilogue_max(int lhs, int rhs) { return lhs > rhs ? lhs : rhs; }
 
+//完全对应cute swizzle的BMS
 constexpr int sm80_epilogue_swizzle_apply(int offset, int swizzle_bits, int swizzle_mbase, int swizzle_shift)
 {
+    //没有要swizzle的位，直接返回
     if (swizzle_bits <= 0) {
         return offset;
     }
-
+    //构造需要混淆的比特数掩码
     int const bit_mask = (1 << swizzle_bits) - 1;
     int const y_mask   = bit_mask << (swizzle_mbase + sm80_epilogue_max(0, swizzle_shift));
-    return offset ^ ((offset & y_mask) >> swizzle_shift);
+    return offset ^ ((offset & y_mask) >> swizzle_shift);//XOR操作
 }
-
+//逻辑二维坐标 (major, minor)对应的swizzle过后的物理地址偏移
 constexpr int sm80_epilogue_tiled_offset(int major,
                                          int minor,
                                          int logical_major_extent,
@@ -1020,12 +1023,12 @@ constexpr int sm80_epilogue_tiled_offset(int major,
     int const atom_offset = minor_local * row_elements + major_local;
     return tile_base + sm80_epilogue_swizzle_apply(atom_offset, swizzle_bits, swizzle_mbase, swizzle_shift);
 }
-
+//计算bank conflict得分
 constexpr int sm80_epilogue_bank_conflict_score(int element_bytes,
                                                 int logical_major_extent,
                                                 int logical_minor_extent,
                                                 int vector_bytes,
-                                                int issue_threads,
+                                                int issue_threads,// 同一时刻发射请求的线程数 (SM80 半 Warp = 16)
                                                 int sim_threads,
                                                 int row_elements,
                                                 int minor_elements,
@@ -1037,7 +1040,7 @@ constexpr int sm80_epilogue_bank_conflict_score(int element_bytes,
     if (!valid) {
         return 1 << 28;
     }
-
+    // 计算一个向量化指令包含多少个独立元素
     int const vector_elements = vector_bytes / element_bytes;
     int       conflicts       = 0;
 
@@ -1069,7 +1072,7 @@ constexpr int sm80_epilogue_bank_conflict_score(int element_bytes,
 
     return conflicts;
 }
-
+//计算向量化不对齐惩罚
 constexpr int sm80_epilogue_vector_alignment_penalty(int element_bytes,
                                                      int logical_major_extent,
                                                      int logical_minor_extent,
@@ -1089,7 +1092,7 @@ constexpr int sm80_epilogue_vector_alignment_penalty(int element_bytes,
 
     int const vector_elements = vector_bytes / element_bytes;
     int       penalty         = 0;
-
+    // 这里我们只关心每个线程一次向量访存的“首元素”地址
     for (int group = 0; group < sim_threads; group += issue_threads) {
         for (int thread = 0; thread < issue_threads; ++thread) {
             int const logical = (group + thread) * vector_elements;
@@ -1111,7 +1114,7 @@ constexpr int sm80_epilogue_vector_alignment_penalty(int element_bytes,
 
     return penalty;
 }
-
+//验证 Swizzle 是否发挥了作用
 constexpr int sm80_epilogue_naive_bank_conflict_score(int element_bytes,
                                                       int logical_major_extent,
                                                       int logical_minor_extent,
@@ -1143,21 +1146,23 @@ constexpr int sm80_epilogue_naive_bank_conflict_score(int element_bytes,
 
     return conflicts;
 }
-
+//接受一组参数，静态计算出这种排布方案的各项属性和最终得分
 template <class Element,
           int BlkM,
           int BlkN,
           int VectorBytes,
           bool IsMnMajor,
           int RowBytes,
-          int MinorElements_,
-          int SwizzleMBase_>
+          int MinorElements_,// 给定测试布局次维大小
+          int SwizzleMBase_>// 给定测试混淆基底
 struct Sm80EpilogueLayoutCandidate
 {
     static constexpr int ElementBytes       = int(sizeof(Element));
     static constexpr int LogicalMajorExtent = IsMnMajor ? BlkM : BlkN;
     static constexpr int LogicalMinorExtent = IsMnMajor ? BlkN : BlkM;
+    // Ampere SM80 半线程束发射
     static constexpr int IssueThreads       = 16;
+    // 整个 Warp 大小
     static constexpr int SimThreads         = 32;
     static constexpr int InstructionBytes   = IssueThreads * VectorBytes;
     static constexpr int LogicalMajorBytes  = LogicalMajorExtent * ElementBytes;
@@ -1172,6 +1177,7 @@ struct Sm80EpilogueLayoutCandidate
                                      (LogicalMajorExtent % RowElements) == 0;
     static constexpr bool MinorLegal = MinorElements > 0 && sm80_epilogue_is_pow2(MinorElements) &&
                                        (LogicalMinorExtent % MinorElements) == 0;
+    //计算 swizzle
     static constexpr int  RowLog =
         Sm80Log2OrZero<RowElements, ((RowBytes % ElementBytes) == 0 && sm80_epilogue_is_pow2(RowElements))>::value;
     static constexpr int  SwizzleBits  = RowLog - SwizzleMBase;
@@ -1208,23 +1214,24 @@ struct Sm80EpilogueLayoutCandidate
     static constexpr int RowSpanPenalty    = sm80_constexpr_abs(RowBytes - TargetRowBytes);
     static constexpr int MinorShapePenalty = sm80_constexpr_abs(MinorElements - IssueThreads);
     static constexpr int SwizzleMBasePenalty = sm80_constexpr_abs(SwizzleMBase - 3);
+    //根据不同权重计算总分
     static constexpr int Score =
         Valid ? (BankConflictScore * 4096 + AlignmentPenalty * 64 + RowSpanPenalty * 4 + MinorShapePenalty
                  + SwizzleMBasePenalty)
               : (1 << 28);
 };
-
+// 给定 Best 和 Candidate 两个类型，通过 std::conditional_t 选取 Score 更小的一个
 template <class Best, class Candidate>
 struct Sm80BetterEpilogueCandidate
 {
     using type = cute::conditional_t<(Candidate::Score < Best::Score), Candidate, Best>;
 };
-
+// 递归终点：只剩一个 Candidate 时，直接返回它
 template <class Candidate, class... Rest> struct Sm80BestEpilogueCandidate
 {
     using type = Candidate;
 };
-
+// 变长模板递归比较：把前两个对比，胜者再去和剩下的 Rest 列表比较
 template <class Candidate0, class Candidate1, class... Rest>
 struct Sm80BestEpilogueCandidate<Candidate0, Candidate1, Rest...>
 {
@@ -1235,6 +1242,7 @@ struct Sm80BestEpilogueCandidate<Candidate0, Candidate1, Rest...>
 template <class Element, int BlkM, int BlkN, int VectorBytes, bool IsMnMajor, int RowBytes>
 struct Sm80BestEpilogueCandidateForRow
 {
+    // MinorElements={4,8,16,32} × SwizzleMBase={2,3,4}枚举遍历最优
     using type = typename Sm80BestEpilogueCandidate<
         Sm80EpilogueLayoutCandidate<Element, BlkM, BlkN, VectorBytes, IsMnMajor, RowBytes, 4, 2>,
         Sm80EpilogueLayoutCandidate<Element, BlkM, BlkN, VectorBytes, IsMnMajor, RowBytes, 4, 3>,
@@ -1249,7 +1257,7 @@ struct Sm80BestEpilogueCandidateForRow
         Sm80EpilogueLayoutCandidate<Element, BlkM, BlkN, VectorBytes, IsMnMajor, RowBytes, 32, 3>,
         Sm80EpilogueLayoutCandidate<Element, BlkM, BlkN, VectorBytes, IsMnMajor, RowBytes, 32, 4>>::type;
 };
-
+//找出最优RowBytes
 template <class Element, int BlkM, int BlkN, int VectorBytes, bool IsMnMajor>
 struct Sm80BestEpilogueLayoutCandidate
 {
@@ -1292,7 +1300,7 @@ struct Sm80TensorOpEpilogueSmemLayoutSelector
 
     static_assert(BestCandidate::Valid,
                   "SM80 epilogue layout selector found no legal vectorized, padding-free swizzled layout.");
-
+    //生成 CuTe swizzle对象
     using SwizzleAtom = cute::conditional_t<
         IsMnMajor,
         decltype(cute::composition(cute::Swizzle<SwizzleBase, SwizzleMBase, SwizzleShift>{},
@@ -1455,7 +1463,7 @@ struct Sm80TensorOpRoleC
     using RegisterToGlobalCopy = RegToGmemCopy;
 
     static constexpr bool HasZeroGlueEpilogueMapping = true;
-
+    // 返回对应的 CuTe 寄存器 Fragment
     template <class ThreadCopy, class SmemTensor, class OutputTensor>
     CUTE_HOST_DEVICE static auto retile_smem_to_output(ThreadCopy const &thr_copy,
                                                        SmemTensor const &smem_tensor,
@@ -1463,7 +1471,7 @@ struct Sm80TensorOpRoleC
     {
         return cute::make_tuple(thr_copy.partition_S(smem_tensor), thr_copy.partition_D(output_tensor));
     }
-
+    //直接在寄存器侧将数据形状 retile 后对接给 D 矩阵写入器
     template <class ThreadCopy, class RegisterTensor, class OutputTensor>
     CUTE_HOST_DEVICE static auto retile_register_to_output(ThreadCopy const &thr_copy,
                                                            RegisterTensor const &register_tensor,
