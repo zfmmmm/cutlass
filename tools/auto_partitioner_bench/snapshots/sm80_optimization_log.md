@@ -122,3 +122,96 @@ Artifacts: `build/auto_partitioner_bench/results/sm80_sweep.csv`, `build/auto_pa
 
 - Why it helps: the output-thread-map contract reduces shared-load conflict to official-level, and the row-span/canonical-swizzle selector reduces accumulator shared-store conflict below the official baseline without using padding.
 - Remaining gap: 1024 and 2048 still trail the official baseline in some runs; the remaining bottleneck is likely mainloop pipeline/scheduling rather than epilogue shared-memory conflict.
+
+## v08 fair_benchmark_and_ncu_bottleneck
+
+- Snapshots:
+  - `sm80_autopartition_gemm_v08_fair_benchmark_baseline.cu`
+  - `sm80_benchmark_common_v08_fair_benchmark_baseline.hpp`
+  - `run_gemm_sweep_v08_fair_benchmark_baseline.py`
+- Change from v07:
+  - Added a shared benchmark helper so AutoPartitioner and official CUTLASS use identical A/B initialization, CPU reference, CUDA event timing, error checks, and input/output hashes.
+  - The sweep CSV now records raw runtime samples, input hashes, output hash, and output aggregate statistics.
+- Fairness command:
+  - `python3 tools/auto_partitioner_bench/run_gemm_sweep.py --arch sm80 --sizes 256,512,1024,2048,4096,8192 --warmup 3 --iterations 10 --repeat-runs 3 --skip-reference --verify-sizes 256,512 --plot`
+- Fairness result:
+  - For every tested size, AutoPartitioner and official CUTLASS had identical `input_a_hash`, `input_b_hash`, and `output_hash`.
+
+### Nsight bottleneck diagnosis
+
+Speed/conflict counter command:
+
+```bash
+ncu --target-processes all \
+  --kernel-name-base demangled \
+  --kernel-name 'regex:.*sm80_autopartition_gemm_kernel.*' \
+  --launch-count 1 \
+  --metrics sm__throughput.avg.pct_of_peak_sustained_elapsed,smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active,l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum,l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum,smsp__inst_executed_pipe_tensor.sum \
+  build/auto_partitioner_bench/bin/sm80_autopartition_gemm \
+  --m=2048 --n=2048 --k=2048 --warmup=0 --iterations=1 --skip-reference
+```
+
+Official comparison command:
+
+```bash
+ncu --target-processes all \
+  --kernel-name-base demangled \
+  --kernel-name 'regex:.*cutlass.*gemm.*' \
+  --launch-count 1 \
+  --metrics sm__throughput.avg.pct_of_peak_sustained_elapsed,smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active,l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum,l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum,smsp__inst_executed_pipe_tensor.sum \
+  build/auto_partitioner_bench/bin/sm80_cutlass_official_gemm \
+  --m=2048 --n=2048 --k=2048 --warmup=0 --iterations=1 --skip-reference
+```
+
+Key output:
+
+| Metric | AutoPartitioner | Official CUTLASS | Meaning |
+| --- | ---: | ---: | --- |
+| `smsp__inst_executed_pipe_tensor.sum` | 4,194,304 | 4,194,304 | Both execute the same amount of tensor work. |
+| `l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum` | 44,912 | 49,379 | AP epilogue/mainloop shared loads are not worse. |
+| `l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum` | 7,242 | 23,284 | AP epilogue shared stores are better than official. |
+| `sm__throughput.avg.pct_of_peak_sustained_elapsed` | 45.66% | 47.25% | Official still feeds the chip slightly better. |
+| `smsp__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active` | 46.66% | 48.40% | Remaining gap is tensor-pipe utilization, not wrong MMA count. |
+
+Warp-stall diagnosis command:
+
+```bash
+ncu --target-processes all \
+  --kernel-name-base demangled \
+  --kernel-name 'regex:.*sm80_autopartition_gemm_kernel.*' \
+  --launch-count 1 \
+  --metrics smsp__average_warps_active_per_issue_active,smsp__warp_issue_stalled_barrier_per_warp_active,smsp__warp_issue_stalled_short_scoreboard_per_warp_active,smsp__warp_issue_stalled_long_scoreboard_per_warp_active,smsp__warp_issue_stalled_mio_throttle_per_warp_active,smsp__warp_issue_stalled_math_pipe_throttle_per_warp_active,smsp__warp_issue_stalled_not_selected_per_warp_active \
+  build/auto_partitioner_bench/bin/sm80_autopartition_gemm \
+  --m=2048 --n=2048 --k=2048 --warmup=0 --iterations=1 --skip-reference
+```
+
+Key output:
+
+| Stall metric | AutoPartitioner | Official CUTLASS | Interpretation |
+| --- | ---: | ---: | --- |
+| `smsp__warp_issue_stalled_barrier_per_warp_active.pct` | 22.58% | 3.79% | AP single-stage mainloop spends far more time at CTA barriers. |
+| `smsp__warp_issue_stalled_long_scoreboard_per_warp_active.pct` | 15.86% | 3.21% | AP has more memory dependency waiting before tensor work can continue. |
+| `smsp__warp_issue_stalled_short_scoreboard_per_warp_active.pct` | 1.03% | 0.93% | LDSM/shared dependency is not the main gap. |
+| `smsp__warp_issue_stalled_math_pipe_throttle_per_warp_active.pct` | 41.76% | 62.26% | Official reaches tensor-pipe pressure more often; AP is stopped earlier by barriers/dependencies. |
+
+Diagnosis: the current AP epilogue layout is no longer the main bottleneck. The remaining gap is the single-stage mainloop schedule: `cp.async -> wait<0> -> __syncthreads -> cooperative_gemm -> __syncthreads`. Official CUTLASS uses `MmaMultistage<..., 3>`, visible in the profiled kernel name, and has much lower barrier and long-scoreboard stalls.
+
+### Failed experiment: naive two-buffer cp.async overlap
+
+- Change tried: doubled A/B shared storage and issued the next K-tile `cp.async` before computing the current K-tile.
+- Result command:
+  - `python3 tools/auto_partitioner_bench/run_gemm_sweep.py --arch sm80 --sizes 1024,2048,4096,8192 --warmup 3 --iterations 10 --repeat-runs 3 --skip-reference --plot --output build/auto_partitioner_bench/results/sm80_sweep_v09_double_buffer.csv`
+- Result:
+  - 2048 dropped from about 43.43 TFLOP/s to 41.16 TFLOP/s.
+  - 4096 dropped from about 44.24 TFLOP/s to 40.79 TFLOP/s.
+- Conclusion: simply double-buffering around `cooperative_gemm` is not equivalent to CUTLASS multistage. It increases shared-memory footprint and synchronization cost without creating the fine-grained warp-level pipeline needed to reduce the observed barrier stalls. No improvement snapshot was kept.
+
+### Failed experiment: relax launch bounds
+
+- Change tried: `__launch_bounds__(ThreadCount, 4)` to `__launch_bounds__(ThreadCount, 2)`.
+- Result command:
+  - `python3 tools/auto_partitioner_bench/run_gemm_sweep.py --arch sm80 --sizes 1024,2048,4096 --warmup 3 --iterations 10 --repeat-runs 3 --skip-reference --output build/auto_partitioner_bench/results/sm80_sweep_v09_launchbounds2.csv`
+- Result:
+  - 1024 became slightly slower.
+  - 2048 and 4096 were effectively unchanged.
+- Conclusion: the remaining bottleneck is not solved by relaxing the register/occupancy contract. The kernel was restored to `__launch_bounds__(ThreadCount, 4)`. No improvement snapshot was kept.

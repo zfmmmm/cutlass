@@ -270,10 +270,10 @@ __global__ __launch_bounds__(ThreadCount, 4) void sm80_autopartition_gemm_kernel
         Tensor gA_k = gA(_, _, k_tile);
         Tensor gB_k = gB(_, _, k_tile);
 
-        Tensor tAgA = thr_copy_A.partition_S(gA_k);
-        Tensor tAsA = thr_copy_A.partition_D(sA);
-        Tensor tBgB = thr_copy_B.partition_S(gB_k);
-        Tensor tBsB = thr_copy_B.partition_D(sB);
+        Tensor                             tAgA       = thr_copy_A.partition_S(gA_k);
+        Tensor                             tAsA       = thr_copy_A.partition_D(sA);
+        Tensor                             tBgB       = thr_copy_B.partition_S(gB_k);
+        Tensor                             tBsB       = thr_copy_B.partition_D(sB);
         copy(tiled_copy_A, tAgA, tAsA);
         copy(tiled_copy_B, tBgB, tBsB);
         cp_async_fence();
