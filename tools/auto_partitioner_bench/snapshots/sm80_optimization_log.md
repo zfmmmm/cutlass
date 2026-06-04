@@ -215,3 +215,31 @@ Diagnosis: the current AP epilogue layout is no longer the main bottleneck. The 
   - 1024 became slightly slower.
   - 2048 and 4096 were effectively unchanged.
 - Conclusion: the remaining bottleneck is not solved by relaxing the register/occupancy contract. The kernel was restored to `__launch_bounds__(ThreadCount, 4)`. No improvement snapshot was kept.
+
+### Failed experiment: outer K-tile 3-stage cp.async pipeline
+
+- Change tried:
+  - Expanded mainloop shared storage to 3 stages for A and B.
+  - Loaded two K tiles in the prologue.
+  - In the mainloop, prefetched `k_tile + 2` and used `cp_async_wait<1>()` to keep one async copy group in flight.
+  - This was an outer K-tile pipeline around `cooperative_gemm(...)`, not a rewrite of the inner warp-level MMA mainloop.
+- Result command:
+  - `python3 tools/auto_partitioner_bench/run_gemm_sweep.py --arch sm80 --sizes 1024,2048,4096,8192 --warmup 3 --iterations 10 --repeat-runs 3 --skip-reference --plot --output build/auto_partitioner_bench/results/sm80_sweep_v09_3stage.csv`
+- Result:
+  - 1024 dropped to 34.79 TFLOP/s.
+  - 2048 dropped to 41.06 TFLOP/s.
+  - 4096 dropped to 40.32 TFLOP/s.
+  - 8192 dropped to 26.31 TFLOP/s.
+  - 4096 and 8192 had output hashes that differed from official, so the experiment was not acceptable for correctness even though aggregate sums were close.
+- Follow-up fix:
+  - Restored the AP example from `sm80_autopartition_gemm_v08_fair_benchmark_baseline.cu`.
+  - Strengthened `run_gemm_sweep.py` so `output_hash` mismatch now fails the sweep instead of only checking aggregate output statistics.
+- Restore verification:
+  - `tools/auto_partitioner_bench/build_benchmarks.sh`
+  - `python3 tools/auto_partitioner_bench/run_gemm_sweep.py --arch sm80 --sizes 2048,4096 --warmup 3 --iterations 10 --repeat-runs 3 --skip-reference --output build/auto_partitioner_bench/results/sm80_sweep_restored_after_3stage.csv`
+  - 2048 restored to 43.414 TFLOP/s with matching input/output hashes.
+  - 4096 restored to 44.2599 TFLOP/s with matching input/output hashes.
+- Conclusion:
+  - The Nsight bottleneck still points to multistage mainloop scheduling, but wrapping `cooperative_gemm` with an outer 3-stage K-tile pipeline is not sufficient and can be incorrect.
+  - The next viable direction is to expose a stage-aware RoleA/RoleB contract and implement a CUTLASS-like inner mainloop that interleaves iterator advance, `cp.async`, `ldmatrix`, and `mma.sync` at a finer granularity.
+  - No improvement snapshot was kept.

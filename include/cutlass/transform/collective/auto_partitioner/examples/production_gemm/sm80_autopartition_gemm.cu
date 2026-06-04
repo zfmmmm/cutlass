@@ -270,10 +270,10 @@ __global__ __launch_bounds__(ThreadCount, 4) void sm80_autopartition_gemm_kernel
         Tensor gA_k = gA(_, _, k_tile);
         Tensor gB_k = gB(_, _, k_tile);
 
-        Tensor tAgA = thr_copy_A.partition_S(gA_k);
-        Tensor tAsA = thr_copy_A.partition_D(sA);
-        Tensor tBgB = thr_copy_B.partition_S(gB_k);
-        Tensor tBsB = thr_copy_B.partition_D(sB);
+        Tensor                             tAgA       = thr_copy_A.partition_S(gA_k);
+        Tensor                             tAsA       = thr_copy_A.partition_D(sA);
+        Tensor                             tBgB       = thr_copy_B.partition_S(gB_k);
+        Tensor                             tBsB       = thr_copy_B.partition_D(sB);
         copy(tiled_copy_A, tAgA, tAsA);
         copy(tiled_copy_B, tBgB, tBsB);
         cp_async_fence();
@@ -291,7 +291,7 @@ __global__ __launch_bounds__(ThreadCount, 4) void sm80_autopartition_gemm_kernel
                          typename PartB::SmemToRegCopyOperation{});
         __syncthreads();
     }
-    //mma写回shared做重排
+
     auto r2s_tiled_copy_C =
         make_tiled_copy_C(Copy_Atom<typename PartC::RegToSmemCopyOperation, typename PartC::EpilogueElement>{},
                           thr_mma);
@@ -300,22 +300,22 @@ __global__ __launch_bounds__(ThreadCount, 4) void sm80_autopartition_gemm_kernel
     Tensor tRS_sAcc       = r2s_thr_copy_C.partition_D(sC);
     copy(r2s_tiled_copy_C, tRS_rAcc, tRS_sAcc);
     __syncthreads();
-    //shared写回register做类型转换
+
     typename PartC::SharedToOutputRegisterCopy s2r_tiled_copy_C;
     auto   s2r_thr_copy_C = s2r_tiled_copy_C.get_thread_slice(threadIdx.x);
     auto   s2r_contract   = PartC::retile_smem_to_output(s2r_thr_copy_C, sC, gC);
     Tensor tSR_sAcc       = cute::get<0>(s2r_contract);
     Tensor tSR_rAcc       = make_tensor<typename PartC::EpilogueElement>(shape(tSR_sAcc));
     Tensor tSR_rD         = make_tensor<OutputElement>(shape(tSR_sAcc));
+
     copy(s2r_tiled_copy_C, tSR_sAcc, tSR_rAcc);
 
-    //转换类型
     cutlass::NumericConverter<OutputElement, typename PartC::EpilogueElement> convert;
     CUTE_UNROLL
     for (int i = 0; i < size(tSR_rAcc); ++i) {
         tSR_rD(i) = convert(tSR_rAcc(i));
     }
-    //register写回global
+
     typename PartC::OutputRegisterToGlobalCopy r2g_tiled_copy_C;
     auto r2g_thr_copy_C   = r2g_tiled_copy_C.get_thread_slice(threadIdx.x);
     auto r2g_contract     = PartC::retile_register_to_output(r2g_thr_copy_C, tSR_rD, gC);

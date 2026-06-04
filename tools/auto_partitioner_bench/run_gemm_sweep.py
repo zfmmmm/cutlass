@@ -126,6 +126,11 @@ def check_control_variables(size, summaries, output_rel_tol):
                 f"input B hash mismatch at {size}: {reference_name}={reference['input_b_hash']} "
                 f"{name}={summary['input_b_hash']}"
             )
+        if summary["output_hash"] != reference["output_hash"]:
+            raise RuntimeError(
+                f"output hash mismatch at {size}: {reference_name}={reference['output_hash']} "
+                f"{name}={summary['output_hash']}"
+            )
 
         abs_sum_diff = rel_diff(summary["output_abs_sum"], reference["output_abs_sum"])
         sq_sum_diff = rel_diff(summary["output_sq_sum"], reference["output_sq_sum"])
