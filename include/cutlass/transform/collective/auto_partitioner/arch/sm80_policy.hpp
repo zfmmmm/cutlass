@@ -35,10 +35,8 @@
 
 #include "../auto_partitioner.hpp"
 
-namespace autopartition
-{
-namespace detail
-{
+namespace autopartition {
+namespace detail {
 /**
  * @brief Type trait to check if a given element type is supported for SM80 SIMT operations.
  *
@@ -46,9 +44,10 @@ namespace detail
  */
 template <class Element>
 struct IsSm80SimtElement
-    : std::integral_constant<bool, std::is_same<Element, float>::value || std::is_same<Element, double>::value ||
-                                       std::is_same<Element, cutlass::half_t>::value ||
-                                       std::is_same<Element, cutlass::bfloat16_t>::value>
+    : std::integral_constant<bool,
+                             std::is_same<Element, float>::value || std::is_same<Element, double>::value
+                                 || std::is_same<Element, cutlass::half_t>::value
+                                 || std::is_same<Element, cutlass::bfloat16_t>::value>
 {
 };
 /**
@@ -58,11 +57,12 @@ struct IsSm80SimtElement
  */
 template <class Element>
 struct IsSm80TensorOpElement
-    : std::integral_constant<bool, std::is_same<Element, double>::value || std::is_same<Element, float>::value ||
-                                       std::is_same<Element, cutlass::tfloat32_t>::value ||
-                                       std::is_same<Element, cutlass::half_t>::value ||
-                                       std::is_same<Element, cutlass::bfloat16_t>::value ||
-                                       std::is_same<Element, int8_t>::value || std::is_same<Element, uint8_t>::value>
+    : std::integral_constant<bool,
+                             std::is_same<Element, double>::value || std::is_same<Element, float>::value
+                                 || std::is_same<Element, cutlass::tfloat32_t>::value
+                                 || std::is_same<Element, cutlass::half_t>::value
+                                 || std::is_same<Element, cutlass::bfloat16_t>::value
+                                 || std::is_same<Element, int8_t>::value || std::is_same<Element, uint8_t>::value>
 {
 };
 /**
@@ -71,10 +71,7 @@ struct IsSm80TensorOpElement
  * @param value The input integer.
  * @return constexpr int The absolute value of the input.
  */
-constexpr int sm80_constexpr_abs(int value)
-{
-    return value < 0 ? -value : value;
-}
+constexpr int sm80_constexpr_abs(int value) { return value < 0 ? -value : value; }
 /**
  * @brief Determines the optimal SIMT thread layout (Thread M x Thread N) for a given CTA tile size.
  * It evaluates candidate layouts based on squareness and tile shape alignment to minimize cost.
@@ -93,17 +90,14 @@ template <int TileM, int TileN, int ThreadCount, bool CIsMnMajor = (TileM >= Til
     // 判断线程布局合法性：能整除，达到ContinuousLaneTarget目标
     static constexpr bool is_candidate_legal(int tm)
     {
-        if (tm <= 0 || ThreadCount % tm != 0)
-        {
+        if (tm <= 0 || ThreadCount % tm != 0) {
             return false;
         }
         int tn = ThreadCount / tm;
-        if (tm > TileM || tn > TileN)
-        {
+        if (tm > TileM || tn > TileN) {
             return false;
         }
-        if ((TileM % tm) != 0 || (TileN % tn) != 0)
-        {
+        if ((TileM % tm) != 0 || (TileN % tn) != 0) {
             return false;
         }
         return CIsMnMajor ? (tm >= ContinuousLaneTarget) : (tn >= ContinuousLaneTarget);
@@ -121,17 +115,14 @@ template <int TileM, int TileN, int ThreadCount, bool CIsMnMajor = (TileM >= Til
     // 遍历所有布局，找出最优布局
     static constexpr int select_tm()
     {
-        int best_tm = 0;
+        int best_tm    = 0;
         int best_score = 1 << 30;
-        for (int tm = 1; tm <= ThreadCount; tm *= 2)
-        {
-            if (is_candidate_legal(tm))
-            {
+        for (int tm = 1; tm <= ThreadCount; tm *= 2) {
+            if (is_candidate_legal(tm)) {
                 int score = candidate_cost(tm);
-                if (score < best_score)
-                {
+                if (score < best_score) {
                     best_score = score;
-                    best_tm = tm;
+                    best_tm    = tm;
                 }
             }
         }
@@ -166,23 +157,20 @@ struct OptimalTensorOpThreadLayout
     static_assert(WarpCount == 1 || WarpCount == 2 || WarpCount == 4 || WarpCount == 8,
                   "SM80 TensorOp supports 1, 2, 4, or 8 warps.");
     // 获取 MMA atom 的shape
-    using AtomShape = typename cute::MMA_Traits<MmaOperation>::Shape_MNK;
+    using AtomShape            = typename cute::MMA_Traits<MmaOperation>::Shape_MNK;
     static constexpr int AtomM = cute::size<0>(AtomShape{});
     static constexpr int AtomN = cute::size<1>(AtomShape{});
     // 判断warp候选是否合法，warp能否整除，warp内线程能否被atom整除
     static constexpr bool is_candidate_legal(int warp_m)
     {
-        if (warp_m <= 0 || WarpCount % warp_m != 0)
-        {
+        if (warp_m <= 0 || WarpCount % warp_m != 0) {
             return false;
         }
         int warp_n = WarpCount / warp_m;
-        if (warp_m > TileM || warp_n > TileN)
-        {
+        if (warp_m > TileM || warp_n > TileN) {
             return false;
         }
-        if ((TileM % warp_m) != 0 || (TileN % warp_n) != 0)
-        {
+        if ((TileM % warp_m) != 0 || (TileN % warp_n) != 0) {
             return false;
         }
         int warp_tile_m = TileM / warp_m;
@@ -192,33 +180,30 @@ struct OptimalTensorOpThreadLayout
     // 给候选 warp layout 打分
     static constexpr int candidate_cost(int warp_m)
     {
-        int warp_n = WarpCount / warp_m;
+        int warp_n      = WarpCount / warp_m;
         int warp_tile_m = TileM / warp_m;
         int warp_tile_n = TileN / warp_n;
-        int repeat_m = warp_tile_m / AtomM;
-        int repeat_n = warp_tile_n / AtomN;
-        int max_repeat = (repeat_m > repeat_n) ? repeat_m : repeat_n;
+        int repeat_m    = warp_tile_m / AtomM;
+        int repeat_n    = warp_tile_n / AtomN;
+        int max_repeat  = (repeat_m > repeat_n) ? repeat_m : repeat_n;
 
-        int repeat_balance_cost = sm80_constexpr_abs(repeat_m - repeat_n) *
-                                  1024; // 每个 warp 内 MMA atom 的两个维度的重复次数应该尽可能相近，权重最高
+        int repeat_balance_cost = sm80_constexpr_abs(repeat_m - repeat_n)
+                                * 1024; // 每个 warp 内 MMA atom 的两个维度的重复次数应该尽可能相近，权重最高
         int warp_square_cost = sm80_constexpr_abs(warp_tile_m - warp_tile_n) * 8; // 每个 warp 负责的 tile 形状
         int pressure_cost = max_repeat * 32 + repeat_m * repeat_n; // 惩罚某个方向 repeat 太长+惩罚总的 atom 数量
-        int layout_cost = sm80_constexpr_abs(warp_m - warp_n);     // warp layout正
+        int layout_cost = sm80_constexpr_abs(warp_m - warp_n); // warp layout正
         return repeat_balance_cost + warp_square_cost + pressure_cost + layout_cost;
     }
     // 选择最优warp_m
     static constexpr int select_warp_m()
     {
         int best_warp_m = 0;
-        int best_score = 1 << 30;
-        for (int warp_m = 1; warp_m <= WarpCount; warp_m *= 2)
-        {
-            if (is_candidate_legal(warp_m))
-            {
+        int best_score  = 1 << 30;
+        for (int warp_m = 1; warp_m <= WarpCount; warp_m *= 2) {
+            if (is_candidate_legal(warp_m)) {
                 int score = candidate_cost(warp_m);
-                if (score < best_score)
-                {
-                    best_score = score;
+                if (score < best_score) {
+                    best_score  = score;
                     best_warp_m = warp_m;
                 }
             }
@@ -226,12 +211,12 @@ struct OptimalTensorOpThreadLayout
         return best_warp_m;
     }
 
-    static constexpr int WarpM = select_warp_m();
-    static constexpr int WarpN = (WarpM == 0) ? 0 : WarpCount / WarpM;
+    static constexpr int WarpM     = select_warp_m();
+    static constexpr int WarpN     = (WarpM == 0) ? 0 : WarpCount / WarpM;
     static constexpr int WarpTileM = (WarpM == 0) ? 0 : TileM / WarpM;
     static constexpr int WarpTileN = (WarpN == 0) ? 0 : TileN / WarpN;
-    static constexpr int RepeatM = (WarpTileM == 0) ? 0 : WarpTileM / AtomM;
-    static constexpr int RepeatN = (WarpTileN == 0) ? 0 : WarpTileN / AtomN;
+    static constexpr int RepeatM   = (WarpTileM == 0) ? 0 : WarpTileM / AtomM;
+    static constexpr int RepeatN   = (WarpTileN == 0) ? 0 : WarpTileN / AtomN;
 
     static_assert(WarpM != 0, "No legal SM80 TensorOp warp layout for this tile, thread count, and MMA atom.");
     using Layout = cute::Layout<cute::Shape<cute::Int<WarpM>, cute::Int<WarpN>, cute::_1>>;
@@ -259,24 +244,18 @@ template <class Element, int ContiguousElements, int MaxAlignmentBytes = 16> str
         (MaxAlignmentBytes >= 4 && ElementBytes <= 4 && (4 % ElementBytes) == 0) ? (4 / ElementBytes) : 0;
 
     static constexpr int value = [] {
-        if constexpr (Align16 != 0)
-        {
-            if constexpr ((ContiguousElements % Align16) == 0)
-            {
+        if constexpr (Align16 != 0) {
+            if constexpr ((ContiguousElements % Align16) == 0) {
                 return Align16;
             }
         }
-        if constexpr (Align8 != 0)
-        {
-            if constexpr ((ContiguousElements % Align8) == 0)
-            {
+        if constexpr (Align8 != 0) {
+            if constexpr ((ContiguousElements % Align8) == 0) {
                 return Align8;
             }
         }
-        if constexpr (Align4 != 0)
-        {
-            if constexpr ((ContiguousElements % Align4) == 0)
-            {
+        if constexpr (Align4 != 0) {
+            if constexpr ((ContiguousElements % Align4) == 0) {
                 return Align4;
             }
         }
@@ -304,26 +283,21 @@ template <int AlignmentElements, int ThreadCount, int TileMN, int TileK, bool Is
 struct IsLegalSimtGmemTiledCopyAlignment
 {
     static constexpr bool value = [] {
-        if constexpr (AlignmentElements == 0)
-        {
+        if constexpr (AlignmentElements == 0) {
             return false;
         }
-        else
-        {
+        else {
             constexpr int MajorExtent = IsMnMajor ? TileMN : TileK;
             constexpr int MinorExtent = IsMnMajor ? TileK : TileMN;
             constexpr int MajorThreads =
                 (ThreadCount >= MajorExtent / AlignmentElements) ? (MajorExtent / AlignmentElements) : ThreadCount;
-            if constexpr (MajorThreads <= 0)
-            {
+            if constexpr (MajorThreads <= 0) {
                 return false;
             }
-            else if constexpr ((ThreadCount % MajorThreads) != 0)
-            {
+            else if constexpr ((ThreadCount % MajorThreads) != 0) {
                 return false;
             }
-            else
-            {
+            else {
                 constexpr int MinorThreads = ThreadCount / MajorThreads;
                 return (MinorThreads == 0) || ((MinorExtent % MinorThreads) == 0);
             }
@@ -348,7 +322,7 @@ struct GmemTiledCopyAlignment
     static_assert(MaxAlignmentBytes == 4 || MaxAlignmentBytes == 8 || MaxAlignmentBytes == 16,
                   "Gmem alignment must be one of 4, 8, or 16 bytes.");
 
-    static constexpr int ElementBytes = int(sizeof(Element));
+    static constexpr int ElementBytes       = int(sizeof(Element));
     static constexpr int ContiguousElements = IsMnMajor ? TileMN : TileK;
     static constexpr int Align16 =
         (MaxAlignmentBytes >= 16 && ElementBytes <= 16 && (16 % ElementBytes) == 0) ? (16 / ElementBytes) : 0;
@@ -358,27 +332,21 @@ struct GmemTiledCopyAlignment
         (MaxAlignmentBytes >= 4 && ElementBytes <= 4 && (4 % ElementBytes) == 0) ? (4 / ElementBytes) : 0;
 
     static constexpr int value = [] {
-        if constexpr (Align16 != 0)
-        {
-            if constexpr ((ContiguousElements % Align16) == 0 &&
-                          IsLegalSimtGmemTiledCopyAlignment<Align16, ThreadCount, TileMN, TileK, IsMnMajor>::value)
-            {
+        if constexpr (Align16 != 0) {
+            if constexpr ((ContiguousElements % Align16) == 0
+                          && IsLegalSimtGmemTiledCopyAlignment<Align16, ThreadCount, TileMN, TileK, IsMnMajor>::value) {
                 return Align16;
             }
         }
-        if constexpr (Align8 != 0)
-        {
-            if constexpr ((ContiguousElements % Align8) == 0 &&
-                          IsLegalSimtGmemTiledCopyAlignment<Align8, ThreadCount, TileMN, TileK, IsMnMajor>::value)
-            {
+        if constexpr (Align8 != 0) {
+            if constexpr ((ContiguousElements % Align8) == 0
+                          && IsLegalSimtGmemTiledCopyAlignment<Align8, ThreadCount, TileMN, TileK, IsMnMajor>::value) {
                 return Align8;
             }
         }
-        if constexpr (Align4 != 0)
-        {
-            if constexpr ((ContiguousElements % Align4) == 0 &&
-                          IsLegalSimtGmemTiledCopyAlignment<Align4, ThreadCount, TileMN, TileK, IsMnMajor>::value)
-            {
+        if constexpr (Align4 != 0) {
+            if constexpr ((ContiguousElements % Align4) == 0
+                          && IsLegalSimtGmemTiledCopyAlignment<Align4, ThreadCount, TileMN, TileK, IsMnMajor>::value) {
                 return Align4;
             }
         }
@@ -428,14 +396,14 @@ template <class Element, class GmemStride, int TileMN, int TileK, int ThreadCoun
 struct Sm80SimtMainloopRole
 {
     static constexpr bool IsMnMajor = cutlass::gemm::detail::is_mn_major<GmemStride>();
-    static constexpr int Padding = SmemPaddingElements<Element>::value;
+    static constexpr int  Padding   = SmemPaddingElements<Element>::value;
 
     using SmemLayoutAtom = cute::conditional_t<IsMnMajor,
                                                cute::Layout<cute::Shape<cute::Int<TileMN>, cute::Int<TileK>>,
                                                             cute::Stride<cute::_1, cute::Int<TileMN + Padding>>>,
                                                cute::Layout<cute::Shape<cute::Int<TileMN>, cute::Int<TileK>>,
                                                             cute::Stride<cute::Int<TileK + Padding>, cute::_1>>>;
-    using SmemLayout = SmemLayoutAtom;
+    using SmemLayout     = SmemLayoutAtom;
 
     static constexpr int ContiguousDimLength = IsMnMajor ? TileMN : TileK;
     // 最小搬运颗粒度元素数
@@ -446,29 +414,36 @@ struct Sm80SimtMainloopRole
         GmemTiledCopyAlignment<Element, TileMN, TileK, ThreadCount, IsMnMajor, GmemAlignmentBytes>::bytes;
 
     static constexpr int GmemToSmemAlignmentElements = VectorAlignmentElements;
-    static constexpr int GmemToSmemAlignmentBytes = VectorAlignmentBytes;
-    using AlignmentType = cute::uint_byte_t<GmemToSmemAlignmentBytes>;
+    static constexpr int GmemToSmemAlignmentBytes    = VectorAlignmentBytes;
+    using AlignmentType                              = cute::uint_byte_t<GmemToSmemAlignmentBytes>;
     // 采用zero fill的cp.acync原子搬运
     using GmemCopyAtom = cute::Copy_Atom<cute::SM80_CP_ASYNC_CACHEALWAYS_ZFILL<AlignmentType>, Element>;
     // 根据 copy atom、线程数、向量化宽度、global layout stride、tile shape，自动构造一个 CTA 级 global → shared 的
     // tiled copy 对象
     using TiledGmemToSmemCopy =
-        decltype(cutlass::gemm::collective::detail::make_simt_gmem_tiled_copy<GmemCopyAtom, ThreadCount,
-                                                                              GmemToSmemAlignmentElements, GmemStride,
-                                                                              cute::Int<TileMN>, cute::Int<TileK>>());
+        decltype(cutlass::gemm::collective::detail::make_simt_gmem_tiled_copy<GmemCopyAtom,
+                                                                              ThreadCount,
+                                                                              GmemToSmemAlignmentElements,
+                                                                              GmemStride,
+                                                                              cute::Int<TileMN>,
+                                                                              cute::Int<TileK>>());
     using GmemToSmemCopy = TiledGmemToSmemCopy;
 
     using SmemToRegCopy = cute::Copy_Atom<cute::DefaultCopy, Element>;
     using RegToSmemCopy = cute::Copy_Atom<cute::DefaultCopy, Element>;
     // S2G不能使用cp.async
     using SmemToGmemCopy = decltype(cutlass::gemm::collective::detail::make_simt_gmem_tiled_copy<
-                                    VectorizedCopyAtom<Element, VectorAlignmentElements>, ThreadCount,
-                                    VectorAlignmentElements, GmemStride, cute::Int<TileMN>, cute::Int<TileK>>());
+                                    VectorizedCopyAtom<Element, VectorAlignmentElements>,
+                                    ThreadCount,
+                                    VectorAlignmentElements,
+                                    GmemStride,
+                                    cute::Int<TileMN>,
+                                    cute::Int<TileK>>());
 
-    using GlobalToSharedCopy = GmemToSmemCopy;
+    using GlobalToSharedCopy   = GmemToSmemCopy;
     using SharedToRegisterCopy = SmemToRegCopy;
     using RegisterToSharedCopy = RegToSmemCopy;
-    using SharedToGlobalCopy = SmemToGmemCopy;
+    using SharedToGlobalCopy   = SmemToGmemCopy;
 };
 
 /**
@@ -481,8 +456,13 @@ struct Sm80SimtMainloopRole
  * @tparam GmemAlignmentBytes The guaranteed global memory alignment in bytes.
  */
 template <class Element, class GmemStride, class TileShape_MNK, int ThreadCount, int GmemAlignmentBytes>
-struct Sm80SimtRoleA : Sm80SimtMainloopRole<Element, GmemStride, cute::size<0>(TileShape_MNK{}),
-                                            cute::size<2>(TileShape_MNK{}), ThreadCount, GmemAlignmentBytes>
+struct Sm80SimtRoleA
+    : Sm80SimtMainloopRole<Element,
+                           GmemStride,
+                           cute::size<0>(TileShape_MNK{}),
+                           cute::size<2>(TileShape_MNK{}),
+                           ThreadCount,
+                           GmemAlignmentBytes>
 {
 };
 
@@ -496,8 +476,13 @@ struct Sm80SimtRoleA : Sm80SimtMainloopRole<Element, GmemStride, cute::size<0>(T
  * @tparam GmemAlignmentBytes The guaranteed global memory alignment in bytes.
  */
 template <class Element, class GmemStride, class TileShape_MNK, int ThreadCount, int GmemAlignmentBytes>
-struct Sm80SimtRoleB : Sm80SimtMainloopRole<Element, GmemStride, cute::size<1>(TileShape_MNK{}),
-                                            cute::size<2>(TileShape_MNK{}), ThreadCount, GmemAlignmentBytes>
+struct Sm80SimtRoleB
+    : Sm80SimtMainloopRole<Element,
+                           GmemStride,
+                           cute::size<1>(TileShape_MNK{}),
+                           cute::size<2>(TileShape_MNK{}),
+                           ThreadCount,
+                           GmemAlignmentBytes>
 {
 };
 
@@ -518,11 +503,11 @@ struct Sm80SimtRoleC
     static constexpr int BlkN = cute::size<1>(TileShape_MNK{});
 
     static constexpr bool IsMnMajor = cutlass::gemm::detail::is_mn_major<GmemStride>();
-    static constexpr int Padding = SmemPaddingElements<Element>::value;
+    static constexpr int  Padding   = SmemPaddingElements<Element>::value;
 
-    using ThreadLayout = typename OptimalSimtThreadLayout<BlkM, BlkN, ThreadCount, IsMnMajor>::Layout;
-    using MmaAtom = cute::MMA_Atom<cute::UniversalFMA<Element, Element, Element>>;
-    using TiledMma = decltype(cute::make_tiled_mma(MmaAtom{}, ThreadLayout{}));
+    using ThreadLayout   = typename OptimalSimtThreadLayout<BlkM, BlkN, ThreadCount, IsMnMajor>::Layout;
+    using MmaAtom        = cute::MMA_Atom<cute::UniversalFMA<Element, Element, Element>>;
+    using TiledMma       = decltype(cute::make_tiled_mma(MmaAtom{}, ThreadLayout{}));
     using SmemLayoutAtom = cute::conditional_t<
         IsMnMajor,
         cute::Layout<cute::Shape<cute::Int<BlkM>, cute::Int<BlkN>>, cute::Stride<cute::_1, cute::Int<BlkM + Padding>>>,
@@ -535,23 +520,31 @@ struct Sm80SimtRoleC
     static constexpr int AlignmentBytes =
         GmemTiledCopyAlignment<Element, BlkM, BlkN, ThreadCount, IsMnMajor, GmemAlignmentBytes>::bytes;
     static constexpr int GmemToSmemAlignmentBytes = AlignmentBytes;
-    using AlignmentType = cute::uint_byte_t<AlignmentBytes>;
+    using AlignmentType                           = cute::uint_byte_t<AlignmentBytes>;
 
     using GmemToSmemCopy = decltype(cutlass::gemm::collective::detail::make_simt_gmem_tiled_copy<
                                     cute::Copy_Atom<cute::SM80_CP_ASYNC_CACHEALWAYS_ZFILL<AlignmentType>, Element>,
-                                    ThreadCount, AlignmentElements, GmemStride, cute::Int<BlkM>, cute::Int<BlkN>>());
+                                    ThreadCount,
+                                    AlignmentElements,
+                                    GmemStride,
+                                    cute::Int<BlkM>,
+                                    cute::Int<BlkN>>());
 
     static constexpr int AlignmentBits = AlignmentBytes * 8;
-    using RegToSmemCopy = cute::Copy_Atom<cute::AutoVectorizingCopyWithAssumedAlignment<AlignmentBits>, Element>;
-    using SmemToRegCopy = cute::Copy_Atom<cute::AutoVectorizingCopyWithAssumedAlignment<AlignmentBits>, Element>;
+    using RegToSmemCopy  = cute::Copy_Atom<cute::AutoVectorizingCopyWithAssumedAlignment<AlignmentBits>, Element>;
+    using SmemToRegCopy  = cute::Copy_Atom<cute::AutoVectorizingCopyWithAssumedAlignment<AlignmentBits>, Element>;
     using SmemToGmemCopy = decltype(cutlass::gemm::collective::detail::make_simt_gmem_tiled_copy<
-                                    VectorizedCopyAtom<Element, AlignmentElements>, ThreadCount, AlignmentElements,
-                                    GmemStride, cute::Int<BlkM>, cute::Int<BlkN>>());
+                                    VectorizedCopyAtom<Element, AlignmentElements>,
+                                    ThreadCount,
+                                    AlignmentElements,
+                                    GmemStride,
+                                    cute::Int<BlkM>,
+                                    cute::Int<BlkN>>());
 
-    using GlobalToSharedCopy = GmemToSmemCopy;
+    using GlobalToSharedCopy   = GmemToSmemCopy;
     using SharedToRegisterCopy = SmemToRegCopy;
     using RegisterToSharedCopy = RegToSmemCopy;
-    using SharedToGlobalCopy = SmemToGmemCopy;
+    using SharedToGlobalCopy   = SmemToGmemCopy;
 };
 
 template <class Element> struct Sm80TensorOpTraits;
@@ -568,7 +561,7 @@ struct Sm80TensorOpSmemCopyOperation;
 template <> struct Sm80TensorOpTraits<cutlass::half_t>
 {
     using MmaOperation = cute::SM80_16x8x16_F32F16F16F32_TN;
-    using Accumulator = float;
+    using Accumulator  = float;
 };
 /**
  * @brief SM80 TensorOp traits specialization for BF16 (bfloat16_t) elements.
@@ -579,7 +572,7 @@ template <> struct Sm80TensorOpTraits<cutlass::half_t>
 template <> struct Sm80TensorOpTraits<cutlass::bfloat16_t>
 {
     using MmaOperation = cute::SM80_16x8x16_F32BF16BF16F32_TN;
-    using Accumulator = float;
+    using Accumulator  = float;
 };
 /**
  * @brief SM80 TensorOp traits specialization for TF32 (tfloat32_t) elements.
@@ -590,7 +583,7 @@ template <> struct Sm80TensorOpTraits<cutlass::bfloat16_t>
 template <> struct Sm80TensorOpTraits<cutlass::tfloat32_t>
 {
     using MmaOperation = cute::SM80_16x8x8_F32TF32TF32F32_TN;
-    using Accumulator = float;
+    using Accumulator  = float;
 };
 /**
  * @brief SM80 TensorOp traits specialization for standard FP32 (float) elements.
@@ -610,7 +603,7 @@ template <> struct Sm80TensorOpTraits<float> : Sm80TensorOpTraits<cutlass::tfloa
 template <> struct Sm80TensorOpTraits<double>
 {
     using MmaOperation = cute::SM80_8x8x4_F64F64F64F64_TN;
-    using Accumulator = double;
+    using Accumulator  = double;
 };
 /**
  * @brief SM80 TensorOp traits specialization for signed 8-bit integers.
@@ -621,7 +614,7 @@ template <> struct Sm80TensorOpTraits<double>
 template <> struct Sm80TensorOpTraits<int8_t>
 {
     using MmaOperation = cute::SM80_16x8x32_S32S8S8S32_TN;
-    using Accumulator = int32_t;
+    using Accumulator  = int32_t;
 };
 /**
  * @brief SM80 TensorOp traits specialization for unsigned 8-bit integers.
@@ -632,7 +625,7 @@ template <> struct Sm80TensorOpTraits<int8_t>
 template <> struct Sm80TensorOpTraits<uint8_t>
 {
     using MmaOperation = cute::SM80_16x8x32_S32U8U8S32_TN;
-    using Accumulator = int32_t;
+    using Accumulator  = int32_t;
 };
 /**
  * @brief Determines whether a specific SM80 TensorOp MMA operation requires an MN-major shared memory layout.
@@ -714,9 +707,9 @@ struct Sm80TensorOpSmemCopyOperation<Element, MmaOperation, IsRoleA, SmemIsMnMaj
 template <class Element, class MmaOperation, bool IsRoleA, bool SmemIsMnMajor, int AlignmentElements>
 struct Sm80TensorOpSmemCopyOperation<Element, MmaOperation, IsRoleA, SmemIsMnMajor, AlignmentElements, false>
 {
-    static constexpr int AlignmentBits = AlignmentElements * int(sizeof(Element)) * 8;
+    static constexpr int  AlignmentBits = AlignmentElements * int(sizeof(Element)) * 8;
     static constexpr bool NeedTranspose = false;
-    using type = cute::AutoVectorizingCopyWithAssumedAlignment<AlignmentBits>;
+    using type                          = cute::AutoVectorizingCopyWithAssumedAlignment<AlignmentBits>;
 };
 /**
  * @brief Computes shared memory swizzle configuration parameters to prevent bank conflicts
@@ -727,13 +720,13 @@ struct Sm80TensorOpSmemCopyOperation<Element, MmaOperation, IsRoleA, SmemIsMnMaj
  */
 template <class Element, int TileK> struct Sm80TensorOpSwizzleRow
 {
-    static constexpr int RowBytes = TileK * int(sizeof(Element)); // 一行字节数
-    static constexpr int Bytes = (RowBytes >= 128 && (RowBytes % 128) == 0) ? 128
-                                 : (RowBytes >= 64 && (RowBytes % 64) == 0) ? 64
-                                 : (RowBytes >= 32 && (RowBytes % 32) == 0) ? 32
-                                                                            : 0; // 选择 swizzle 粒度
-    static constexpr int Base = (Bytes == 128) ? 3 : (Bytes == 64) ? 2 : (Bytes == 32) ? 1 : 0;
-    static constexpr int Elements = Bytes / int(sizeof(Element));
+    static constexpr int  RowBytes  = TileK * int(sizeof(Element)); // 一行字节数
+    static constexpr int  Bytes     = (RowBytes >= 128 && (RowBytes % 128) == 0) ? 128
+                                    : (RowBytes >= 64 && (RowBytes % 64) == 0)   ? 64
+                                    : (RowBytes >= 32 && (RowBytes % 32) == 0)   ? 32
+                                                                                 : 0; // 选择 swizzle 粒度
+    static constexpr int  Base      = (Bytes == 128) ? 3 : (Bytes == 64) ? 2 : (Bytes == 32) ? 1 : 0;
+    static constexpr int  Elements  = Bytes / int(sizeof(Element));
     static constexpr bool Supported = (Bytes != 0);
 };
 /**
@@ -759,8 +752,9 @@ struct Sm80TensorOpSmemLayoutSelector<Element, TileMN, TileK, true, false>
     using SwizzleAtom = decltype(cute::composition(
         cute::Swizzle<SwizzleBase, 3, 3>{}, // 对于128bytes,16B,MS固定为3,3
         cute::Layout<cute::Shape<cute::_8, cute::Int<RowElements>>, cute::Stride<cute::Int<RowElements>, cute::_1>>{}));
-    using type = decltype(cute::tile_to_shape(
-        SwizzleAtom{}, cute::Shape<cute::Int<TileMN>, cute::Int<TileK>>{})); // 铺满整个 shared memory tile 的 layout
+    using type        = decltype(cute::tile_to_shape(
+        SwizzleAtom{},
+        cute::Shape<cute::Int<TileMN>, cute::Int<TileK>>{})); // 铺满整个 shared memory tile 的 layout
 };
 
 template <class Element, int TileMN, int TileK>
@@ -781,11 +775,11 @@ template <class Element, int TileMN, int TileK, bool IsMnMajor>
 struct Sm80TensorOpSmemLayoutSelector<Element, TileMN, TileK, false, IsMnMajor>
 {
     static constexpr int Padding = SmemPaddingElements<Element>::value;
-    using type = cute::conditional_t<IsMnMajor,
-                                     cute::Layout<cute::Shape<cute::Int<TileMN>, cute::Int<TileK>>,
-                                                  cute::Stride<cute::_1, cute::Int<TileMN + Padding>>>,
-                                     cute::Layout<cute::Shape<cute::Int<TileMN>, cute::Int<TileK>>,
-                                                  cute::Stride<cute::Int<TileK + Padding>, cute::_1>>>;
+    using type                   = cute::conditional_t<IsMnMajor,
+                                                       cute::Layout<cute::Shape<cute::Int<TileMN>, cute::Int<TileK>>,
+                                                                    cute::Stride<cute::_1, cute::Int<TileMN + Padding>>>,
+                                                       cute::Layout<cute::Shape<cute::Int<TileMN>, cute::Int<TileK>>,
+                                                                    cute::Stride<cute::Int<TileK + Padding>, cute::_1>>>;
 };
 /**
  * @brief Creates a generic CuTe TiledMMA operation descriptor mapping from a base MMA atom and thread layout.
@@ -817,16 +811,16 @@ struct Sm80TensorOpTiledMmaSelector
 template <class Element, class MmaAtom, class ThreadLayout, int TileM, int TileN, int TileK>
 struct Sm80LdMatrixTiledMmaSelector
 {
-    using AtomShape = typename MmaAtom::Shape_MNK;
-    static constexpr int AtomM = cute::size<0>(AtomShape{});
-    static constexpr int AtomN = cute::size<1>(AtomShape{});
-    static constexpr int AtomK = cute::size<2>(AtomShape{});
-    static constexpr int WarpM = cute::size<0>(ThreadLayout{});
-    static constexpr int WarpN = cute::size<1>(ThreadLayout{});
+    using AtomShape                = typename MmaAtom::Shape_MNK;
+    static constexpr int AtomM     = cute::size<0>(AtomShape{});
+    static constexpr int AtomN     = cute::size<1>(AtomShape{});
+    static constexpr int AtomK     = cute::size<2>(AtomShape{});
+    static constexpr int WarpM     = cute::size<0>(ThreadLayout{});
+    static constexpr int WarpN     = cute::size<1>(ThreadLayout{});
     static constexpr int WarpTileM = TileM / WarpM;
     static constexpr int WarpTileN = TileN / WarpN;
-    static constexpr int RepeatM = WarpTileM / AtomM;
-    static constexpr int RepeatN = WarpTileN / AtomN;
+    static constexpr int RepeatM   = WarpTileM / AtomM;
+    static constexpr int RepeatN   = WarpTileN / AtomN;
 
     static_assert((TileM % WarpM) == 0 && (TileN % WarpN) == 0,
                   "Selected SM80 TensorOp thread layout must evenly divide the CTA tile.");
@@ -883,56 +877,64 @@ struct Sm80TensorOpTiledMmaSelector<cutlass::bfloat16_t, MmaAtom, ThreadLayout, 
 template <class Element, class GmemStride, int TileMN, int TileK, int ThreadCount, bool IsRoleA, int GmemAlignmentBytes>
 struct Sm80TensorOpMainloopRole
 {
-    static constexpr bool IsMnMajor = cutlass::gemm::detail::is_mn_major<GmemStride>();
-    static constexpr int ContiguousDimLength = IsMnMajor ? TileMN : TileK;
+    static constexpr bool IsMnMajor           = cutlass::gemm::detail::is_mn_major<GmemStride>();
+    static constexpr int  ContiguousDimLength = IsMnMajor ? TileMN : TileK;
 
     static constexpr int AlignmentElements =
         GmemTiledCopyAlignment<Element, TileMN, TileK, ThreadCount, IsMnMajor, GmemAlignmentBytes>::value;
     static constexpr int AlignmentBytes =
         GmemTiledCopyAlignment<Element, TileMN, TileK, ThreadCount, IsMnMajor, GmemAlignmentBytes>::bytes;
-    static constexpr int AlignmentBits = AlignmentBytes * 8;
+    static constexpr int AlignmentBits               = AlignmentBytes * 8;
     static constexpr int GmemToSmemAlignmentElements = AlignmentElements;
-    static constexpr int GmemToSmemAlignmentBytes = AlignmentBytes;
+    static constexpr int GmemToSmemAlignmentBytes    = AlignmentBytes;
 
     static constexpr bool UseLdMatrix =
-        (std::is_same<Element, cutlass::half_t>::value || std::is_same<Element, cutlass::bfloat16_t>::value) &&
-        (TileMN % 8 == 0) && Sm80TensorOpSwizzleRow<Element, TileK>::Supported;
+        (std::is_same<Element, cutlass::half_t>::value || std::is_same<Element, cutlass::bfloat16_t>::value)
+        && (TileMN % 8 == 0) && Sm80TensorOpSwizzleRow<Element, TileK>::Supported;
 
-    static constexpr int SwizzleBase = UseLdMatrix ? Sm80TensorOpSwizzleRow<Element, TileK>::Base : 0;
-    static constexpr int SwizzleBytes = UseLdMatrix ? Sm80TensorOpSwizzleRow<Element, TileK>::Bytes : 0;
+    static constexpr int SwizzleBase     = UseLdMatrix ? Sm80TensorOpSwizzleRow<Element, TileK>::Base : 0;
+    static constexpr int SwizzleBytes    = UseLdMatrix ? Sm80TensorOpSwizzleRow<Element, TileK>::Bytes : 0;
     static constexpr int SwizzleElements = UseLdMatrix ? Sm80TensorOpSwizzleRow<Element, TileK>::Elements : 0;
-    using MmaOperation = typename Sm80TensorOpTraits<Element>::MmaOperation;
+    using MmaOperation                   = typename Sm80TensorOpTraits<Element>::MmaOperation;
 
     using SmemLayoutAtom =
         typename Sm80TensorOpSmemLayoutSelector<Element, TileMN, TileK, UseLdMatrix, IsMnMajor>::type;
     using SmemLayout = SmemLayoutAtom;
 
     using AlignmentType = cute::uint_byte_t<AlignmentBytes>;
-    using GmemCopyAtom = cute::Copy_Atom<cute::SM80_CP_ASYNC_CACHEALWAYS_ZFILL<AlignmentType>, Element>;
+    using GmemCopyAtom  = cute::Copy_Atom<cute::SM80_CP_ASYNC_CACHEALWAYS_ZFILL<AlignmentType>, Element>;
     using TiledGmemToSmemCopy =
-        decltype(cutlass::gemm::collective::detail::make_simt_gmem_tiled_copy<
-                 GmemCopyAtom, ThreadCount, AlignmentElements, GmemStride, cute::Int<TileMN>, cute::Int<TileK>>());
+        decltype(cutlass::gemm::collective::detail::make_simt_gmem_tiled_copy<GmemCopyAtom,
+                                                                              ThreadCount,
+                                                                              AlignmentElements,
+                                                                              GmemStride,
+                                                                              cute::Int<TileMN>,
+                                                                              cute::Int<TileK>>());
 
     using GmemToSmemCpAsyncCopy = TiledGmemToSmemCopy;
-    using GmemToSmemCopy = cute::AutoCopyAsync;
+    using GmemToSmemCopy        = cute::AutoCopyAsync;
 
     using SmemCopySelector =
         Sm80TensorOpSmemCopyOperation<Element, MmaOperation, IsRoleA, IsMnMajor, AlignmentElements, UseLdMatrix>;
     static constexpr bool SmemToRegNeedTranspose = SmemCopySelector::NeedTranspose;
-    using SmemToRegCopyOperation = typename SmemCopySelector::type; // 获取操作atom
-    using SmemToRegCopy = cute::Copy_Atom<SmemToRegCopyOperation, Element>;
+    using SmemToRegCopyOperation                 = typename SmemCopySelector::type; // 获取操作atom
+    using SmemToRegCopy                          = cute::Copy_Atom<SmemToRegCopyOperation, Element>;
 
     using RegToSmemCopyOperation = cute::AutoVectorizingCopyWithAssumedAlignment<AlignmentBits>;
-    using RegToSmemCopy = cute::Copy_Atom<RegToSmemCopyOperation, Element>;
-    using SmemToGmemCopy = decltype(cutlass::gemm::collective::detail::make_simt_gmem_tiled_copy<
-                                    VectorizedCopyAtom<Element, AlignmentElements>, ThreadCount, AlignmentElements,
-                                    GmemStride, cute::Int<TileMN>, cute::Int<TileK>>());
+    using RegToSmemCopy          = cute::Copy_Atom<RegToSmemCopyOperation, Element>;
+    using SmemToGmemCopy         = decltype(cutlass::gemm::collective::detail::make_simt_gmem_tiled_copy<
+                                            VectorizedCopyAtom<Element, AlignmentElements>,
+                                            ThreadCount,
+                                            AlignmentElements,
+                                            GmemStride,
+                                            cute::Int<TileMN>,
+                                            cute::Int<TileK>>());
 
     // using GlobalToSharedCopy = GmemToSmemCopy;
-    using GlobalToSharedCopy = GmemToSmemCpAsyncCopy; // 使用算好的最优copy布局
+    using GlobalToSharedCopy   = GmemToSmemCpAsyncCopy; // 使用算好的最优copy布局
     using SharedToRegisterCopy = SmemToRegCopy;
     using RegisterToSharedCopy = RegToSmemCopy;
-    using SharedToGlobalCopy = SmemToGmemCopy;
+    using SharedToGlobalCopy   = SmemToGmemCopy;
 };
 /**
  * @brief Specializes the TensorOp mainloop data movement and instruction mapping strategy for operand A.
@@ -945,8 +947,13 @@ struct Sm80TensorOpMainloopRole
  */
 template <class Element, class GmemStride, class TileShape_MNK, int ThreadCount, int GmemAlignmentBytes>
 struct Sm80TensorOpRoleA
-    : Sm80TensorOpMainloopRole<Element, GmemStride, cute::size<0>(TileShape_MNK{}), cute::size<2>(TileShape_MNK{}),
-                               ThreadCount, true, GmemAlignmentBytes>
+    : Sm80TensorOpMainloopRole<Element,
+                               GmemStride,
+                               cute::size<0>(TileShape_MNK{}),
+                               cute::size<2>(TileShape_MNK{}),
+                               ThreadCount,
+                               true,
+                               GmemAlignmentBytes>
 {
 };
 /**
@@ -960,12 +967,17 @@ struct Sm80TensorOpRoleA
  */
 template <class Element, class GmemStride, class TileShape_MNK, int ThreadCount, int GmemAlignmentBytes>
 struct Sm80TensorOpRoleB
-    : Sm80TensorOpMainloopRole<Element, GmemStride, cute::size<1>(TileShape_MNK{}), cute::size<2>(TileShape_MNK{}),
-                               ThreadCount, false, GmemAlignmentBytes>
+    : Sm80TensorOpMainloopRole<Element,
+                               GmemStride,
+                               cute::size<1>(TileShape_MNK{}),
+                               cute::size<2>(TileShape_MNK{}),
+                               ThreadCount,
+                               false,
+                               GmemAlignmentBytes>
 {
 };
 // N 必须是正数且为 2 的幂
-//递归计算以 2 为底的对数
+// 递归计算以 2 为底的对数
 template <int N> struct Sm80StaticLog2
 {
     static_assert(N > 0, "Sm80StaticLog2 requires positive N.");
@@ -992,19 +1004,19 @@ constexpr bool sm80_epilogue_is_pow2(int value) { return value > 0 && ((value & 
 
 constexpr int sm80_epilogue_max(int lhs, int rhs) { return lhs > rhs ? lhs : rhs; }
 
-//完全对应cute swizzle的BMS
+// 完全对应cute swizzle的BMS
 constexpr int sm80_epilogue_swizzle_apply(int offset, int swizzle_bits, int swizzle_mbase, int swizzle_shift)
 {
-    //没有要swizzle的位，直接返回
+    // 没有要swizzle的位，直接返回
     if (swizzle_bits <= 0) {
         return offset;
     }
-    //构造需要混淆的比特数掩码
+    // 构造需要混淆的比特数掩码
     int const bit_mask = (1 << swizzle_bits) - 1;
     int const y_mask   = bit_mask << (swizzle_mbase + sm80_epilogue_max(0, swizzle_shift));
-    return offset ^ ((offset & y_mask) >> swizzle_shift);//XOR操作
+    return offset ^ ((offset & y_mask) >> swizzle_shift); // XOR操作
 }
-//逻辑二维坐标 (major, minor)对应的swizzle过后的物理地址偏移
+// 逻辑二维坐标 (major, minor)对应的swizzle过后的物理地址偏移
 constexpr int sm80_epilogue_tiled_offset(int major,
                                          int minor,
                                          int logical_major_extent,
@@ -1023,18 +1035,18 @@ constexpr int sm80_epilogue_tiled_offset(int major,
     int const atom_offset = minor_local * row_elements + major_local;
     return tile_base + sm80_epilogue_swizzle_apply(atom_offset, swizzle_bits, swizzle_mbase, swizzle_shift);
 }
-//计算bank conflict得分
+// 计算bank conflict得分
 constexpr int sm80_epilogue_bank_conflict_score(int element_bytes,
                                                 int logical_major_extent,
                                                 int logical_minor_extent,
                                                 int vector_bytes,
-                                                int issue_threads,// 同一时刻发射请求的线程数 (SM80 半 Warp = 16)
-                                                int sim_threads,
-                                                int row_elements,
-                                                int minor_elements,
-                                                int swizzle_bits,
-                                                int swizzle_mbase,
-                                                int swizzle_shift,
+                                                int issue_threads, // 同一时刻发射请求的线程数 (SM80 半 Warp = 16)
+                                                int  sim_threads,
+                                                int  row_elements,
+                                                int  minor_elements,
+                                                int  swizzle_bits,
+                                                int  swizzle_mbase,
+                                                int  swizzle_shift,
                                                 bool valid)
 {
     if (!valid) {
@@ -1072,18 +1084,18 @@ constexpr int sm80_epilogue_bank_conflict_score(int element_bytes,
 
     return conflicts;
 }
-//计算向量化不对齐惩罚
-constexpr int sm80_epilogue_vector_alignment_penalty(int element_bytes,
-                                                     int logical_major_extent,
-                                                     int logical_minor_extent,
-                                                     int vector_bytes,
-                                                     int issue_threads,
-                                                     int sim_threads,
-                                                     int row_elements,
-                                                     int minor_elements,
-                                                     int swizzle_bits,
-                                                     int swizzle_mbase,
-                                                     int swizzle_shift,
+// 计算向量化不对齐惩罚
+constexpr int sm80_epilogue_vector_alignment_penalty(int  element_bytes,
+                                                     int  logical_major_extent,
+                                                     int  logical_minor_extent,
+                                                     int  vector_bytes,
+                                                     int  issue_threads,
+                                                     int  sim_threads,
+                                                     int  row_elements,
+                                                     int  minor_elements,
+                                                     int  swizzle_bits,
+                                                     int  swizzle_mbase,
+                                                     int  swizzle_shift,
                                                      bool valid)
 {
     if (!valid) {
@@ -1114,7 +1126,7 @@ constexpr int sm80_epilogue_vector_alignment_penalty(int element_bytes,
 
     return penalty;
 }
-//验证 Swizzle 是否发挥了作用
+// 验证 Swizzle 是否发挥了作用
 constexpr int sm80_epilogue_naive_bank_conflict_score(int element_bytes,
                                                       int logical_major_extent,
                                                       int logical_minor_extent,
@@ -1146,48 +1158,46 @@ constexpr int sm80_epilogue_naive_bank_conflict_score(int element_bytes,
 
     return conflicts;
 }
-//接受一组参数，静态计算出这种排布方案的各项属性和最终得分
+// 接受一组参数，静态计算出这种排布方案的各项属性和最终得分
 template <class Element,
-          int BlkM,
-          int BlkN,
-          int VectorBytes,
+          int  BlkM,
+          int  BlkN,
+          int  VectorBytes,
           bool IsMnMajor,
-          int RowBytes,
-          int MinorElements_,// 给定测试布局次维大小
-          int SwizzleMBase_>// 给定测试混淆基底
+          int  RowBytes,
+          int  MinorElements_, // 给定测试布局次维大小
+          int  SwizzleMBase_>   // 给定测试混淆基底
 struct Sm80EpilogueLayoutCandidate
 {
     static constexpr int ElementBytes       = int(sizeof(Element));
     static constexpr int LogicalMajorExtent = IsMnMajor ? BlkM : BlkN;
     static constexpr int LogicalMinorExtent = IsMnMajor ? BlkN : BlkM;
     // Ampere SM80 半线程束发射
-    static constexpr int IssueThreads       = 16;
+    static constexpr int IssueThreads = 16;
     // 整个 Warp 大小
-    static constexpr int SimThreads         = 32;
-    static constexpr int InstructionBytes   = IssueThreads * VectorBytes;
-    static constexpr int LogicalMajorBytes  = LogicalMajorExtent * ElementBytes;
-    static constexpr int TargetRowBytes =
-        LogicalMajorBytes < InstructionBytes ? LogicalMajorBytes : InstructionBytes;
-    static constexpr int RowElements        = RowBytes / ElementBytes;
-    static constexpr int MinorElements      = MinorElements_;
-    static constexpr int SwizzleMBase       = SwizzleMBase_;
+    static constexpr int SimThreads        = 32;
+    static constexpr int InstructionBytes  = IssueThreads * VectorBytes;
+    static constexpr int LogicalMajorBytes = LogicalMajorExtent * ElementBytes;
+    static constexpr int TargetRowBytes = LogicalMajorBytes < InstructionBytes ? LogicalMajorBytes : InstructionBytes;
+    static constexpr int RowElements    = RowBytes / ElementBytes;
+    static constexpr int MinorElements  = MinorElements_;
+    static constexpr int SwizzleMBase   = SwizzleMBase_;
 
-    static constexpr bool RowLegal = (RowBytes % ElementBytes) == 0 && RowElements >= 8 &&
-                                     sm80_epilogue_is_pow2(RowElements) &&
-                                     (LogicalMajorExtent % RowElements) == 0;
-    static constexpr bool MinorLegal = MinorElements > 0 && sm80_epilogue_is_pow2(MinorElements) &&
-                                       (LogicalMinorExtent % MinorElements) == 0;
-    //计算 swizzle
-    static constexpr int  RowLog =
+    static constexpr bool RowLegal = (RowBytes % ElementBytes) == 0 && RowElements >= 8
+                                  && sm80_epilogue_is_pow2(RowElements) && (LogicalMajorExtent % RowElements) == 0;
+    static constexpr bool MinorLegal = MinorElements > 0 && sm80_epilogue_is_pow2(MinorElements)
+                                    && (LogicalMinorExtent % MinorElements) == 0;
+    // 计算 swizzle
+    static constexpr int RowLog =
         Sm80Log2OrZero<RowElements, ((RowBytes % ElementBytes) == 0 && sm80_epilogue_is_pow2(RowElements))>::value;
     static constexpr int  SwizzleBits  = RowLog - SwizzleMBase;
     static constexpr int  SwizzleShift = sm80_epilogue_max(3, SwizzleBits);
     static constexpr bool SwizzleLegal = SwizzleBits >= 0 && SwizzleShift >= SwizzleBits;
-    static constexpr bool VectorLegal =
-        VectorBytes > 0 && (VectorBytes % ElementBytes) == 0 && (RowElements % (VectorBytes / ElementBytes)) == 0;
+    static constexpr bool VectorLegal  = VectorBytes > 0 && (VectorBytes % ElementBytes) == 0
+                                     && (RowElements % (VectorBytes / ElementBytes)) == 0;
     static constexpr bool Valid = RowLegal && MinorLegal && SwizzleLegal && VectorLegal;
 
-    static constexpr int BankConflictScore = sm80_epilogue_bank_conflict_score(ElementBytes,
+    static constexpr int BankConflictScore   = sm80_epilogue_bank_conflict_score(ElementBytes,
                                                                                LogicalMajorExtent,
                                                                                LogicalMinorExtent,
                                                                                VectorBytes,
@@ -1199,7 +1209,7 @@ struct Sm80EpilogueLayoutCandidate
                                                                                SwizzleMBase,
                                                                                SwizzleShift,
                                                                                Valid);
-    static constexpr int AlignmentPenalty  = sm80_epilogue_vector_alignment_penalty(ElementBytes,
+    static constexpr int AlignmentPenalty    = sm80_epilogue_vector_alignment_penalty(ElementBytes,
                                                                                    LogicalMajorExtent,
                                                                                    LogicalMinorExtent,
                                                                                    VectorBytes,
@@ -1211,18 +1221,16 @@ struct Sm80EpilogueLayoutCandidate
                                                                                    SwizzleMBase,
                                                                                    SwizzleShift,
                                                                                    Valid);
-    static constexpr int RowSpanPenalty    = sm80_constexpr_abs(RowBytes - TargetRowBytes);
-    static constexpr int MinorShapePenalty = sm80_constexpr_abs(MinorElements - IssueThreads);
+    static constexpr int RowSpanPenalty      = sm80_constexpr_abs(RowBytes - TargetRowBytes);
+    static constexpr int MinorShapePenalty   = sm80_constexpr_abs(MinorElements - IssueThreads);
     static constexpr int SwizzleMBasePenalty = sm80_constexpr_abs(SwizzleMBase - 3);
-    //根据不同权重计算总分
-    static constexpr int Score =
-        Valid ? (BankConflictScore * 4096 + AlignmentPenalty * 64 + RowSpanPenalty * 4 + MinorShapePenalty
-                 + SwizzleMBasePenalty)
-              : (1 << 28);
+    // 根据不同权重计算总分
+    static constexpr int Score = Valid ? (BankConflictScore * 4096 + AlignmentPenalty * 64 + RowSpanPenalty * 4
+                                          + MinorShapePenalty + SwizzleMBasePenalty)
+                                       : (1 << 28);
 };
 // 给定 Best 和 Candidate 两个类型，通过 std::conditional_t 选取 Score 更小的一个
-template <class Best, class Candidate>
-struct Sm80BetterEpilogueCandidate
+template <class Best, class Candidate> struct Sm80BetterEpilogueCandidate
 {
     using type = cute::conditional_t<(Candidate::Score < Best::Score), Candidate, Best>;
 };
@@ -1257,9 +1265,8 @@ struct Sm80BestEpilogueCandidateForRow
         Sm80EpilogueLayoutCandidate<Element, BlkM, BlkN, VectorBytes, IsMnMajor, RowBytes, 32, 3>,
         Sm80EpilogueLayoutCandidate<Element, BlkM, BlkN, VectorBytes, IsMnMajor, RowBytes, 32, 4>>::type;
 };
-//找出最优RowBytes
-template <class Element, int BlkM, int BlkN, int VectorBytes, bool IsMnMajor>
-struct Sm80BestEpilogueLayoutCandidate
+// 找出最优RowBytes
+template <class Element, int BlkM, int BlkN, int VectorBytes, bool IsMnMajor> struct Sm80BestEpilogueLayoutCandidate
 {
     using Best32  = typename Sm80BestEpilogueCandidateForRow<Element, BlkM, BlkN, VectorBytes, IsMnMajor, 32>::type;
     using Best64  = typename Sm80BestEpilogueCandidateForRow<Element, BlkM, BlkN, VectorBytes, IsMnMajor, 64>::type;
@@ -1287,20 +1294,19 @@ struct Sm80TensorOpEpilogueSmemLayoutSelector
     static constexpr int SwizzleMBase   = BestCandidate::SwizzleMBase;
     static constexpr int SwizzleShift   = BestCandidate::SwizzleShift;
 
-    static constexpr int BankConflictScore = BestCandidate::BankConflictScore;
-    static constexpr int NaiveBankConflictScore =
-        sm80_epilogue_naive_bank_conflict_score(ElementBytes,
-                                                LogicalMajorExtent,
-                                                LogicalMinorExtent,
-                                                VectorBytes,
-                                                IssueThreads,
-                                                SimThreads);
-    static constexpr int AlignmentPenalty = BestCandidate::AlignmentPenalty;
-    static constexpr int SelectionScore   = BestCandidate::Score;
+    static constexpr int BankConflictScore      = BestCandidate::BankConflictScore;
+    static constexpr int NaiveBankConflictScore = sm80_epilogue_naive_bank_conflict_score(ElementBytes,
+                                                                                          LogicalMajorExtent,
+                                                                                          LogicalMinorExtent,
+                                                                                          VectorBytes,
+                                                                                          IssueThreads,
+                                                                                          SimThreads);
+    static constexpr int AlignmentPenalty       = BestCandidate::AlignmentPenalty;
+    static constexpr int SelectionScore         = BestCandidate::Score;
 
     static_assert(BestCandidate::Valid,
                   "SM80 epilogue layout selector found no legal vectorized, padding-free swizzled layout.");
-    //生成 CuTe swizzle对象
+    // 生成 CuTe swizzle对象
     using SwizzleAtom = cute::conditional_t<
         IsMnMajor,
         decltype(cute::composition(cute::Swizzle<SwizzleBase, SwizzleMBase, SwizzleShift>{},
@@ -1328,30 +1334,30 @@ struct Sm80TensorOpRoleC
     static constexpr int BlkN = cute::size<1>(TileShape_MNK{});
     static constexpr int BlkK = cute::size<2>(TileShape_MNK{});
 
-    using MmaOperation = typename Sm80TensorOpTraits<Element>::MmaOperation;
+    using MmaOperation     = typename Sm80TensorOpTraits<Element>::MmaOperation;
     using ThreadLayoutPlan = OptimalTensorOpThreadLayout<BlkM, BlkN, ThreadCount, MmaOperation>;
-    using ThreadLayout = typename ThreadLayoutPlan::Layout;
-    using MmaAtom = cute::MMA_Atom<MmaOperation>;
+    using ThreadLayout     = typename ThreadLayoutPlan::Layout;
+    using MmaAtom          = cute::MMA_Atom<MmaOperation>;
 
-    static constexpr int WarpM = ThreadLayoutPlan::WarpM;
-    static constexpr int WarpN = ThreadLayoutPlan::WarpN;
+    static constexpr int WarpM     = ThreadLayoutPlan::WarpM;
+    static constexpr int WarpN     = ThreadLayoutPlan::WarpN;
     static constexpr int WarpTileM = ThreadLayoutPlan::WarpTileM;
     static constexpr int WarpTileN = ThreadLayoutPlan::WarpTileN;
-    static constexpr int RepeatM = ThreadLayoutPlan::RepeatM;
-    static constexpr int RepeatN = ThreadLayoutPlan::RepeatN;
+    static constexpr int RepeatM   = ThreadLayoutPlan::RepeatM;
+    static constexpr int RepeatN   = ThreadLayoutPlan::RepeatN;
 
-    using ElementInput = Element;
+    using ElementInput   = Element;
     using ElementCompute = typename Sm80TensorOpTraits<Element>::Accumulator;
-    using ElementOutput = ElementC;
+    using ElementOutput  = ElementC;
 
-    using Accumulator = ElementCompute;
+    using Accumulator     = ElementCompute;
     using EpilogueElement = Accumulator;
-    using OutputElement = ElementOutput;
+    using OutputElement   = ElementOutput;
 
-    using TiledMmaSelector = Sm80TensorOpTiledMmaSelector<Element, MmaAtom, ThreadLayout, BlkM, BlkN, BlkK>;
-    using TiledMma = typename TiledMmaSelector::type;
+    using TiledMmaSelector          = Sm80TensorOpTiledMmaSelector<Element, MmaAtom, ThreadLayout, BlkM, BlkN, BlkK>;
+    using TiledMma                  = typename TiledMmaSelector::type;
     static constexpr bool IsMnMajor = cutlass::gemm::detail::is_mn_major<GmemStride>();
-    static constexpr int EpilogueLogicalMajorExtent = IsMnMajor ? BlkM : BlkN;
+    static constexpr int  EpilogueLogicalMajorExtent = IsMnMajor ? BlkM : BlkN;
 
     // -------------------------------------------------------------------------
     // 1. MMA accumulator register <-> shared memory reorder
@@ -1373,9 +1379,9 @@ struct Sm80TensorOpRoleC
     static constexpr int EpilogueAlignmentBits = EpilogueAlignmentBytes * 8;
 
     static constexpr int EpilogueInstructionThreads = 16;
-    static constexpr int EpilogueVectorElements = EpilogueAlignmentElements;
-    static constexpr int EpilogueVectorBytes = EpilogueAlignmentBytes;
-    static constexpr int EpilogueVectorBits = EpilogueAlignmentBits;
+    static constexpr int EpilogueVectorElements     = EpilogueAlignmentElements;
+    static constexpr int EpilogueVectorBytes        = EpilogueAlignmentBytes;
+    static constexpr int EpilogueVectorBits         = EpilogueAlignmentBits;
 
     using EpilogueSwizzleSelector =
         Sm80TensorOpEpilogueSmemLayoutSelector<EpilogueElement, BlkM, BlkN, EpilogueVectorBytes, IsMnMajor>;
@@ -1440,12 +1446,19 @@ struct Sm80TensorOpRoleC
     static constexpr int OutputAlignmentBits = OutputAlignmentBytes * 8;
 
     using OutputGmemTiledCopy = decltype(cutlass::gemm::collective::detail::make_simt_gmem_tiled_copy<
-                                         VectorizedCopyAtom<OutputElement, OutputAlignmentElements>, ThreadCount,
-                                         OutputAlignmentElements, GmemStride, cute::Int<BlkM>, cute::Int<BlkN>>());
+                                         VectorizedCopyAtom<OutputElement, OutputAlignmentElements>,
+                                         ThreadCount,
+                                         OutputAlignmentElements,
+                                         GmemStride,
+                                         cute::Int<BlkM>,
+                                         cute::Int<BlkN>>());
 
     using SharedToOutputRegisterCopy = decltype(cutlass::gemm::collective::detail::make_simt_gmem_tiled_copy<
                                                 VectorizedCopyAtom<EpilogueElement, EpilogueAlignmentElements>,
-                                                ThreadCount, EpilogueAlignmentElements, GmemStride, cute::Int<BlkM>,
+                                                ThreadCount,
+                                                EpilogueAlignmentElements,
+                                                GmemStride,
+                                                cute::Int<BlkM>,
                                                 cute::Int<BlkN>>());
 
     // beta * C 时，从 global C 读入 register。
@@ -1465,17 +1478,16 @@ struct Sm80TensorOpRoleC
     static constexpr bool HasZeroGlueEpilogueMapping = true;
     // 返回对应的 CuTe 寄存器 Fragment
     template <class ThreadCopy, class SmemTensor, class OutputTensor>
-    CUTE_HOST_DEVICE static auto retile_smem_to_output(ThreadCopy const &thr_copy,
-                                                       SmemTensor const &smem_tensor,
-                                                       OutputTensor const &output_tensor)
+    CUTE_HOST_DEVICE static auto
+    retile_smem_to_output(ThreadCopy const &thr_copy, SmemTensor const &smem_tensor, OutputTensor const &output_tensor)
     {
         return cute::make_tuple(thr_copy.partition_S(smem_tensor), thr_copy.partition_D(output_tensor));
     }
-    //直接在寄存器侧将数据形状 retile 后对接给 D 矩阵写入器
+    // 直接在寄存器侧将数据形状 retile 后对接给 D 矩阵写入器
     template <class ThreadCopy, class RegisterTensor, class OutputTensor>
-    CUTE_HOST_DEVICE static auto retile_register_to_output(ThreadCopy const &thr_copy,
+    CUTE_HOST_DEVICE static auto retile_register_to_output(ThreadCopy const     &thr_copy,
                                                            RegisterTensor const &register_tensor,
-                                                           OutputTensor const &output_tensor)
+                                                           OutputTensor const   &output_tensor)
     {
         return cute::make_tuple(thr_copy.retile_S(register_tensor), thr_copy.partition_D(output_tensor));
     }
@@ -1497,10 +1509,26 @@ struct Sm80TensorOpRoleC
  * @tparam GmemAlignmentC Guaranteed alignment constraints for Operand C output array block.
  * @tparam ClusterShape_MNK Threadblock cluster dimension size (traditionally 1x1x1 pre-Hopper).
  */
-template <typename Element, typename GmemStride, typename TileShape_MNK, int ThreadCount, typename ElementC,
-          int GmemAlignmentA, int GmemAlignmentB, int GmemAlignmentC, typename ClusterShape_MNK>
-struct AutoPartitioner<cutlass::arch::Sm80, cutlass::arch::OpClassSimt, Element, GmemStride, TileShape_MNK, ThreadCount,
-                       ElementC, GmemAlignmentA, GmemAlignmentB, GmemAlignmentC, ClusterShape_MNK,
+template <typename Element,
+          typename GmemStride,
+          typename TileShape_MNK,
+          int ThreadCount,
+          typename ElementC,
+          int GmemAlignmentA,
+          int GmemAlignmentB,
+          int GmemAlignmentC,
+          typename ClusterShape_MNK>
+struct AutoPartitioner<cutlass::arch::Sm80,
+                       cutlass::arch::OpClassSimt,
+                       Element,
+                       GmemStride,
+                       TileShape_MNK,
+                       ThreadCount,
+                       ElementC,
+                       GmemAlignmentA,
+                       GmemAlignmentB,
+                       GmemAlignmentC,
+                       ClusterShape_MNK,
                        std::enable_if_t<detail::IsSm80SimtElement<Element>::value>>
 {
     using RoleA = detail::Sm80SimtRoleA<Element, GmemStride, TileShape_MNK, ThreadCount, GmemAlignmentA>;
@@ -1521,10 +1549,26 @@ struct AutoPartitioner<cutlass::arch::Sm80, cutlass::arch::OpClassSimt, Element,
  * @tparam GmemAlignmentC Guaranteed alignment constraints for Operand C memory pointers.
  * @tparam ClusterShape_MNK Threadblock cluster dimension size (traditionally 1x1x1 pre-Hopper).
  */
-template <typename Element, typename GmemStride, typename TileShape_MNK, int ThreadCount, typename ElementC,
-          int GmemAlignmentA, int GmemAlignmentB, int GmemAlignmentC, typename ClusterShape_MNK>
-struct AutoPartitioner<cutlass::arch::Sm80, cutlass::arch::OpClassTensorOp, Element, GmemStride, TileShape_MNK,
-                       ThreadCount, ElementC, GmemAlignmentA, GmemAlignmentB, GmemAlignmentC, ClusterShape_MNK,
+template <typename Element,
+          typename GmemStride,
+          typename TileShape_MNK,
+          int ThreadCount,
+          typename ElementC,
+          int GmemAlignmentA,
+          int GmemAlignmentB,
+          int GmemAlignmentC,
+          typename ClusterShape_MNK>
+struct AutoPartitioner<cutlass::arch::Sm80,
+                       cutlass::arch::OpClassTensorOp,
+                       Element,
+                       GmemStride,
+                       TileShape_MNK,
+                       ThreadCount,
+                       ElementC,
+                       GmemAlignmentA,
+                       GmemAlignmentB,
+                       GmemAlignmentC,
+                       ClusterShape_MNK,
                        std::enable_if_t<detail::IsSm80TensorOpElement<Element>::value>>
 {
     using RoleA = detail::Sm80TensorOpRoleA<Element, GmemStride, TileShape_MNK, ThreadCount, GmemAlignmentA>;
