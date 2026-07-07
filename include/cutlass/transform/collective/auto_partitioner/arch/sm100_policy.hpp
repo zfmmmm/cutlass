@@ -680,6 +680,9 @@ struct Sm100TensorOpRoleC
 
     using SmemLayoutAtom = typename CollectiveEpilogue::SmemLayoutAtomC;
     using SmemLayout     = decltype(cute::tile_to_shape(SmemLayoutAtom{}, EpilogueTileShape{}, EpilogueModeOrder{}));
+    using AccumulatorSmemLayout = SmemLayout;
+    using FusionSmemLayout      = SmemLayout;
+    using FusionElement         = EpilogueElement;
 
     using OutputSmemLayoutAtom = typename CollectiveEpilogue::SmemLayoutAtomD;
     using OutputSmemLayout =
@@ -748,6 +751,78 @@ struct Sm100TensorOpRoleC
     using SharedToRegisterLayout   = SmemLayout;
     using RegisterToSharedLayout   = OutputSmemLayout;
     using SharedToGlobalLayout     = OutputSmemLayout;
+
+    using FusionRegisterToSharedCopyOperation = RegToSmemCopyOperation;
+    using FusionSharedToRegisterCopyOperation = SmemToRegCopyOperation;
+    using FusionRegisterToSharedCopy          = RegToSmemCopy;
+    using FusionSharedToRegisterCopy          = SmemToRegCopy;
+    using FusionSharedLayout                  = FusionSmemLayout;
+
+    using AccumulatorRegisterLayout = decltype(TiledMma{}.get_layoutC_TV());
+    using RegisterReuseAsALayout    = decltype(TiledMma{}.get_layoutA_TV());
+    using RegisterReuseAsBLayout    = decltype(TiledMma{}.get_layoutB_TV());
+
+    using EpilogueRegisterToRegisterCopyOperation = typename CollectiveEpilogue::CopyOpR2R;
+    using RegisterToRegisterCopyOperation         = cute::DefaultCopy;
+    using RegisterToOperandACopyOperation         = RegisterToRegisterCopyOperation;
+    using RegisterToOperandBCopyOperation         = RegisterToRegisterCopyOperation;
+
+    static constexpr bool HasZeroGlueEpilogueMapping = true;
+    static constexpr bool HasFusionSharedMapping     = true;
+    static constexpr bool HasRegisterReuseMapping    = true;
+    static constexpr bool HasRegisterShuffleMapping  = false;
+    static constexpr bool CanReuseAccumulatorAsOperand = std::is_same<EpilogueElement, ElementInput>::value;
+
+    template <class NextTiledMma, class CopyOperation = RegisterToOperandACopyOperation>
+    CUTE_HOST_DEVICE static auto make_register_to_operand_A_copy(NextTiledMma const &next_mma)
+    {
+        return cute::make_tiled_copy_A(cute::Copy_Atom<CopyOperation, EpilogueElement>{}, next_mma);
+    }
+
+    template <class NextTiledMma, class CopyOperation = RegisterToOperandBCopyOperation>
+    CUTE_HOST_DEVICE static auto make_register_to_operand_B_copy(NextTiledMma const &next_mma)
+    {
+        return cute::make_tiled_copy_B(cute::Copy_Atom<CopyOperation, EpilogueElement>{}, next_mma);
+    }
+
+    template <class ThreadCopy, class RegisterTensor, class OperandRegisterTensor>
+    CUTE_HOST_DEVICE static auto retile_register_to_operand(ThreadCopy const           &thr_copy,
+                                                            RegisterTensor const       &register_tensor,
+                                                            OperandRegisterTensor const &operand_tensor)
+    {
+        return cute::make_tuple(thr_copy.retile_S(register_tensor), thr_copy.retile_D(operand_tensor));
+    }
+
+    template <class ThreadCopy, class RegisterTensor, class SmemTensor>
+    CUTE_HOST_DEVICE static auto retile_register_to_fusion_smem(ThreadCopy const     &thr_copy,
+                                                                RegisterTensor const &register_tensor,
+                                                                SmemTensor const     &smem_tensor)
+    {
+        return cute::make_tuple(thr_copy.retile_S(register_tensor), thr_copy.partition_D(smem_tensor));
+    }
+
+    template <class ThreadCopy, class SmemTensor, class RegisterTensor>
+    CUTE_HOST_DEVICE static auto retile_fusion_smem_to_register(ThreadCopy const     &thr_copy,
+                                                                SmemTensor const     &smem_tensor,
+                                                                RegisterTensor const &register_tensor)
+    {
+        return cute::make_tuple(thr_copy.partition_S(smem_tensor), thr_copy.retile_D(register_tensor));
+    }
+
+    template <class ThreadCopy, class SmemTensor, class OutputTensor>
+    CUTE_HOST_DEVICE static auto
+    retile_smem_to_output(ThreadCopy const &thr_copy, SmemTensor const &smem_tensor, OutputTensor const &output_tensor)
+    {
+        return cute::make_tuple(thr_copy.partition_S(smem_tensor), thr_copy.partition_D(output_tensor));
+    }
+
+    template <class ThreadCopy, class RegisterTensor, class OutputTensor>
+    CUTE_HOST_DEVICE static auto retile_register_to_output(ThreadCopy const     &thr_copy,
+                                                           RegisterTensor const &register_tensor,
+                                                           OutputTensor const   &output_tensor)
+    {
+        return cute::make_tuple(thr_copy.retile_S(register_tensor), thr_copy.partition_D(output_tensor));
+    }
 };
 } // namespace detail
 /**

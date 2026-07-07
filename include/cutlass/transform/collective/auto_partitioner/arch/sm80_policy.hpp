@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <cute/arch/copy.hpp>
 #include <cute/atom/copy_atom.hpp>
+#include <cute/atom/copy_traits_sm50.hpp>
 #include <cute/atom/copy_traits_sm75.hpp>
 #include <cute/atom/copy_traits_sm80.hpp>
 #include <cute/atom/mma_atom.hpp>
@@ -1412,6 +1413,10 @@ struct Sm80TensorOpRoleC
 
     using SmemLayout = decltype(cute::tile_to_shape(SmemLayoutAtom{}, cute::Shape<cute::Int<BlkM>, cute::Int<BlkN>>{}));
 
+    using AccumulatorSmemLayout = SmemLayout;
+    using FusionSmemLayout      = SmemLayout;
+    using FusionElement         = EpilogueElement;
+
     using RegToSmemCopyOperation = cute::AutoVectorizingCopyWithAssumedAlignment<EpilogueAlignmentBits>;
 
     using SmemToRegCopyOperation = cute::AutoVectorizingCopyWithAssumedAlignment<EpilogueAlignmentBits>;
@@ -1423,6 +1428,11 @@ struct Sm80TensorOpRoleC
     using RegisterToSharedCopy = RegToSmemCopy;
 
     using SharedToRegisterCopy = SmemToRegCopy;
+
+    using FusionRegisterToSharedCopyOperation = RegToSmemCopyOperation;
+    using FusionSharedToRegisterCopyOperation = SmemToRegCopyOperation;
+    using FusionRegisterToSharedCopy          = RegToSmemCopy;
+    using FusionSharedToRegisterCopy          = SmemToRegCopy;
 
     static constexpr int AlignmentElements = EpilogueAlignmentElements;
 
@@ -1444,6 +1454,14 @@ struct Sm80TensorOpRoleC
         GmemTiledCopyAlignment<OutputElement, BlkM, BlkN, ThreadCount, IsMnMajor, GmemAlignmentBytes>::bytes;
 
     static constexpr int OutputAlignmentBits = OutputAlignmentBytes * 8;
+
+    using OutputSwizzleSelector =
+        Sm80TensorOpEpilogueSmemLayoutSelector<OutputElement, BlkM, BlkN, OutputAlignmentBytes, IsMnMajor>;
+
+    using OutputSmemLayoutAtom = typename OutputSwizzleSelector::SwizzleAtom;
+
+    using OutputSmemLayout =
+        decltype(cute::tile_to_shape(OutputSmemLayoutAtom{}, cute::Shape<cute::Int<BlkM>, cute::Int<BlkN>>{}));
 
     using OutputGmemTiledCopy = decltype(cutlass::gemm::collective::detail::make_simt_gmem_tiled_copy<
                                          VectorizedCopyAtom<OutputElement, OutputAlignmentElements>,
@@ -1467,6 +1485,10 @@ struct Sm80TensorOpRoleC
     // output-op 之后，把 OutputElement register fragment 写回 global D。
     using OutputRegisterToGlobalCopy = OutputGmemTiledCopy;
 
+    using SmemToGmemCopy = OutputGmemTiledCopy;
+
+    using SharedToGlobalCopy = SmemToGmemCopy;
+
     using RegToGmemCopyOperation = cute::AutoVectorizingCopyWithAssumedAlignment<OutputAlignmentBits>;
 
     using RegisterToGlobalCopyAtom = cute::Copy_Atom<RegToGmemCopyOperation, OutputElement>;
@@ -1475,7 +1497,47 @@ struct Sm80TensorOpRoleC
 
     using RegisterToGlobalCopy = RegToGmemCopy;
 
+    using AccumulatorRegisterLayout = decltype(TiledMma{}.get_layoutC_TV());
+    using RegisterReuseAsALayout    = decltype(TiledMma{}.get_layoutA_TV());
+    using RegisterReuseAsBLayout    = decltype(TiledMma{}.get_layoutB_TV());
+
+    using RegisterToRegisterCopyOperation = cute::DefaultCopy;
+    using RegisterShuffleXor1CopyOperation = cute::SM50_Shuffle_U32_2x2Trans_XOR1;
+    using RegisterShuffleXor4CopyOperation = cute::SM50_Shuffle_U32_2x2Trans_XOR4;
+    using RegisterToOperandACopyOperation  = RegisterToRegisterCopyOperation;
+    using RegisterToOperandBCopyOperation  = RegisterToRegisterCopyOperation;
+
+    using SharedToRegisterLayout = SmemLayout;
+    using RegisterToSharedLayout = SmemLayout;
+    using SharedToGlobalLayout   = OutputSmemLayout;
+    using FusionSharedLayout     = FusionSmemLayout;
+
     static constexpr bool HasZeroGlueEpilogueMapping = true;
+    static constexpr bool HasFusionSharedMapping     = true;
+    static constexpr bool HasRegisterReuseMapping    = true;
+    static constexpr bool HasRegisterShuffleMapping  = (sizeof(EpilogueElement) == 4);
+    static constexpr bool CanReuseAccumulatorAsOperand = std::is_same<EpilogueElement, ElementInput>::value;
+
+    template <class NextTiledMma, class CopyOperation = RegisterToOperandACopyOperation>
+    CUTE_HOST_DEVICE static auto make_register_to_operand_A_copy(NextTiledMma const &next_mma)
+    {
+        return cute::make_tiled_copy_A(cute::Copy_Atom<CopyOperation, EpilogueElement>{}, next_mma);
+    }
+
+    template <class NextTiledMma, class CopyOperation = RegisterToOperandBCopyOperation>
+    CUTE_HOST_DEVICE static auto make_register_to_operand_B_copy(NextTiledMma const &next_mma)
+    {
+        return cute::make_tiled_copy_B(cute::Copy_Atom<CopyOperation, EpilogueElement>{}, next_mma);
+    }
+
+    template <class ThreadCopy, class RegisterTensor, class OperandRegisterTensor>
+    CUTE_HOST_DEVICE static auto retile_register_to_operand(ThreadCopy const           &thr_copy,
+                                                            RegisterTensor const       &register_tensor,
+                                                            OperandRegisterTensor const &operand_tensor)
+    {
+        return cute::make_tuple(thr_copy.retile_S(register_tensor), thr_copy.retile_D(operand_tensor));
+    }
+
     // 返回对应的 CuTe 寄存器 Fragment
     template <class ThreadCopy, class SmemTensor, class OutputTensor>
     CUTE_HOST_DEVICE static auto
@@ -1490,6 +1552,22 @@ struct Sm80TensorOpRoleC
                                                            OutputTensor const   &output_tensor)
     {
         return cute::make_tuple(thr_copy.retile_S(register_tensor), thr_copy.partition_D(output_tensor));
+    }
+
+    template <class ThreadCopy, class RegisterTensor, class SmemTensor>
+    CUTE_HOST_DEVICE static auto retile_register_to_fusion_smem(ThreadCopy const     &thr_copy,
+                                                                RegisterTensor const &register_tensor,
+                                                                SmemTensor const     &smem_tensor)
+    {
+        return cute::make_tuple(thr_copy.retile_S(register_tensor), thr_copy.partition_D(smem_tensor));
+    }
+
+    template <class ThreadCopy, class SmemTensor, class RegisterTensor>
+    CUTE_HOST_DEVICE static auto retile_fusion_smem_to_register(ThreadCopy const     &thr_copy,
+                                                                SmemTensor const     &smem_tensor,
+                                                                RegisterTensor const &register_tensor)
+    {
+        return cute::make_tuple(thr_copy.partition_S(smem_tensor), thr_copy.retile_D(register_tensor));
     }
 };
 

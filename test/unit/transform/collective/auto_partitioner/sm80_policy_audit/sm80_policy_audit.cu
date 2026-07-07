@@ -17,11 +17,34 @@
 #include "../../../../common/cutlass_unit_test.h"
 #include "cutlass/numeric_conversion.h"
 #include "cutlass/transform/collective/auto_partitioner/auto_partitioner_builder.hpp"
-#include "cutlass/transform/collective/auto_partitioner/examples/autopartition_example_utils.hpp"
 
 using namespace cute;
 
 namespace autopartition_sm80_policy_audit {
+
+inline float patterned_value(int index)
+{
+    return float((index * 17 + 13) % 29 - 14) * 0.125f;
+}
+
+template <class Element> Element from_float(float value)
+{
+    return cutlass::NumericConverter<Element, float>{}(value);
+}
+
+template <class Element> float audit_to_float(Element value) { return static_cast<float>(value); }
+
+template <class DstTensor, class SrcTensor> CUTE_DEVICE void convert_tensor(DstTensor &dst, SrcTensor const &src)
+{
+    using DstElement = typename cute::remove_cvref_t<DstTensor>::value_type;
+    using SrcElement = typename cute::remove_cvref_t<SrcTensor>::value_type;
+    cutlass::NumericConverter<DstElement, SrcElement> convert;
+
+    CUTE_UNROLL
+    for (int i = 0; i < cute::size(dst); ++i) {
+        dst(i) = convert(src(i));
+    }
+}
 
 bool has_cuda_device()
 {
@@ -36,7 +59,9 @@ bool has_cuda_device()
 
 template <class Element> void fill_audit_pattern(std::vector<Element> &values)
 {
-    autopartition::examples::fill_pattern(values);
+    for (int i = 0; i < int(values.size()); ++i) {
+        values[i] = from_float<Element>(patterned_value(i));
+    }
 }
 
 template <> void fill_audit_pattern<int8_t>(std::vector<int8_t> &values)
@@ -52,8 +77,6 @@ template <> void fill_audit_pattern<uint8_t>(std::vector<uint8_t> &values)
         values[i] = uint8_t((i * 5 + 1) % 13);
     }
 }
-
-template <class Element> float audit_to_float(Element value) { return autopartition::examples::to_float(value); }
 
 template <class AElement, class BElement, class CElement>
 void reference_gemm(int M, int N, int K, AElement const *A, BElement const *B, CElement *C)
@@ -190,7 +213,41 @@ __global__ void sm80_large_register_pressure_kernel(typename PartC::ElementOutpu
     for (int i = 0; i < cute::size(tCrC); ++i) {
         tCrC(i) = typename PartC::Accumulator(float((threadIdx.x + i) % 17) * 0.125f);
     }
-    autopartition::examples::convert_tensor(tCgC, tCrC);
+    convert_tensor(tCgC, tCrC);
+}
+
+template <class PartC>
+__global__ void sm80_register_reuse_contract_kernel(int *status)
+{
+    constexpr int BlkM = PartC::BlkM;
+    constexpr int BlkN = PartC::BlkN;
+
+    Tensor cC = make_identity_tensor(make_shape(Int<BlkM>{}, Int<BlkN>{}));
+    Tensor cA = make_identity_tensor(make_shape(Int<BlkM>{}, Int<BlkN>{}));
+    Tensor cB = make_identity_tensor(make_shape(Int<BlkN>{}, Int<BlkM>{}));
+
+    typename PartC::TiledMma mma;
+    auto                     thr_mma = mma.get_thread_slice(threadIdx.x);
+    Tensor                   tCrC    = thr_mma.make_fragment_C(thr_mma.partition_C(cC));
+    auto                     tCaA    = thr_mma.partition_A(cA);
+    auto                     tCbB    = thr_mma.partition_B(cB);
+    Tensor                   tArA    = make_tensor<typename PartC::EpilogueElement>(shape(tCaA));
+    Tensor                   tBrB    = make_tensor<typename PartC::EpilogueElement>(shape(tCbB));
+
+    auto tiled_copy_A = PartC::make_register_to_operand_A_copy(mma);
+    auto thr_copy_A   = tiled_copy_A.get_thread_slice(threadIdx.x);
+    auto contract_A   = PartC::retile_register_to_operand(thr_copy_A, tCrC, tArA);
+
+    auto tiled_copy_B = PartC::make_register_to_operand_B_copy(mma);
+    auto thr_copy_B   = tiled_copy_B.get_thread_slice(threadIdx.x);
+    auto contract_B   = PartC::retile_register_to_operand(thr_copy_B, tCrC, tBrB);
+
+    if (threadIdx.x == 0) {
+        status[0] = int(size(cute::get<0>(contract_A)));
+        status[1] = int(size(cute::get<1>(contract_A)));
+        status[2] = int(size(cute::get<0>(contract_B)));
+        status[3] = int(size(cute::get<1>(contract_B)));
+    }
 }
 
 template <typename PartA,
@@ -357,12 +414,12 @@ void run_odd_zfill_case()
     std::vector<float> hRef(M * N, 0.0f);
     for (int m = 0; m < M; ++m) {
         for (int k = 0; k < K; ++k) {
-            hA[m * RoundK + k] = autopartition::examples::patterned_value(m * K + k);
+            hA[m * RoundK + k] = patterned_value(m * K + k);
         }
     }
     for (int k = 0; k < K; ++k) {
         for (int n = 0; n < N; ++n) {
-            hB[k * N + n] = autopartition::examples::patterned_value(k * N + n + 17);
+            hB[k * N + n] = patterned_value(k * N + n + 17);
         }
     }
     for (int m = 0; m < M; ++m) {
@@ -638,6 +695,16 @@ TEST(AutoPartitionerSm80Phase4, RegisterPressureAndEpilogueStore)
                                                                16,
                                                                16,
                                                                16>::RoleC;
+    using FloatPartC = typename autopartition::AutoPartitioner<cutlass::arch::Sm80,
+                                                               cutlass::arch::OpClassTensorOp,
+                                                               float,
+                                                               EpiStrideC,
+                                                               EpiTile,
+                                                               128,
+                                                               float,
+                                                               16,
+                                                               16,
+                                                               16>::RoleC;
     static_assert(std::is_same<typename EpiPartC::ElementCompute, float>::value,
                   "Epilogue compute staging remains FP32.");
     static_assert(std::is_same<typename EpiPartC::ElementOutput, EpiOutput>::value,
@@ -649,7 +716,7 @@ TEST(AutoPartitionerSm80Phase4, RegisterPressureAndEpilogueStore)
     static_assert(EpiPartC::OutputAlignmentBytes == EpiPartC::EpilogueVectorBytes,
                   "RoleC output vector width must be derived from the selected output tiled-copy alignment.");
     static_assert(EpiPartC::EpilogueSwizzleBytes == 32 || EpiPartC::EpilogueSwizzleBytes == 64 ||
-                      EpiPartC::EpilogueSwizzleBytes == 128,
+                      EpiPartC::EpilogueSwizzleBytes == 128 || EpiPartC::EpilogueSwizzleBytes == 256,
                   "RoleC epilogue swizzle must use a supported shared-memory swizzle span.");
     static_assert(cute::cosize_v<typename EpiPartC::OutputSmemLayout> == EpiPartC::BlkM * EpiPartC::BlkN,
                   "SM80 RoleC output shared layout must not allocate padding elements.");
@@ -659,6 +726,41 @@ TEST(AutoPartitionerSm80Phase4, RegisterPressureAndEpilogueStore)
                   "SM80 RoleC output shared layout must not be the old padding layout.");
     static_assert((EpiPartC::EpilogueSwizzleBytes % EpiPartC::OutputAlignmentBytes) == 0,
                   "Output shared layout swizzle span must cover whole output vectors.");
+    static_assert(EpiPartC::HasFusionSharedMapping,
+                  "RoleC must expose a shared-memory fusion staging contract.");
+    static_assert(EpiPartC::HasRegisterReuseMapping,
+                  "RoleC must expose a register-reuse mapping contract for chained MMA/fusion.");
+    static_assert(!EpiPartC::CanReuseAccumulatorAsOperand,
+                  "Half TensorOp accumulators are FP32 and cannot become half A/B without an explicit conversion.");
+    static_assert(FloatPartC::CanReuseAccumulatorAsOperand,
+                  "Float/TF32 TensorOp accumulators can be retiled as float A/B operands without type conversion.");
+    static_assert(!std::is_void<typename FloatPartC::RegisterToOperandACopyOperation>::value,
+                  "RoleC must expose a register-to-next-A copy operation.");
+    static_assert(!std::is_void<typename FloatPartC::RegisterToOperandBCopyOperation>::value,
+                  "RoleC must expose a register-to-next-B copy operation.");
+    static_assert(!std::is_void<typename FloatPartC::AccumulatorRegisterLayout>::value,
+                  "RoleC must expose the current accumulator RF layout.");
+    static_assert(!std::is_void<typename FloatPartC::RegisterReuseAsALayout>::value,
+                  "RoleC must expose the next-A RF layout expected by MMA.");
+    static_assert(!std::is_void<typename FloatPartC::RegisterReuseAsBLayout>::value,
+                  "RoleC must expose the next-B RF layout expected by MMA.");
+    static_assert(std::is_same<typename EpiPartC::FusionElement, typename EpiPartC::EpilogueElement>::value,
+                  "Fusion shared memory must stage accumulator values before final output conversion.");
+    static_assert(std::is_same<typename EpiPartC::FusionSmemLayout, typename EpiPartC::SmemLayout>::value,
+                  "Fusion shared staging reuses the accumulator swizzled layout.");
+
+    int *d_contract = nullptr;
+    ASSERT_EQ(cudaMalloc(&d_contract, 4 * sizeof(int)), cudaSuccess);
+    ASSERT_EQ(cudaMemset(d_contract, 0, 4 * sizeof(int)), cudaSuccess);
+    sm80_register_reuse_contract_kernel<FloatPartC><<<1, 128>>>(d_contract);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    int h_contract[4] = {};
+    ASSERT_EQ(cudaMemcpy(h_contract, d_contract, sizeof(h_contract), cudaMemcpyDeviceToHost), cudaSuccess);
+    cudaFree(d_contract);
+    EXPECT_GT(h_contract[0], 0);
+    EXPECT_GT(h_contract[1], 0);
+    EXPECT_GT(h_contract[2], 0);
+    EXPECT_GT(h_contract[3], 0);
 
     std::vector<EpiOutput> hC(64 * 64);
     EpiOutput             *dC = nullptr;

@@ -14,12 +14,26 @@
 #include <cute/tensor.hpp>
 #include <cute/util/print_tensor.hpp>
 
+#include "cutlass/numeric_conversion.h"
 #include "cutlass/transform/collective/auto_partitioner/auto_partitioner_builder.hpp"
-#include "cutlass/transform/collective/auto_partitioner/examples/autopartition_example_utils.hpp"
 
 using namespace cute;
 
 namespace autopartition_sm1xx_policy_audit {
+
+inline float patterned_value(int index) {
+  return float((index * 17 + 13) % 29 - 14) * 0.125f;
+}
+
+template <class Element>
+Element from_float(float value) {
+  return cutlass::NumericConverter<Element, float>{}(value);
+}
+
+template <class Element>
+float to_float(Element value) {
+  return static_cast<float>(value);
+}
 
 bool has_cuda_device() {
   int count = 0;
@@ -34,14 +48,13 @@ bool has_cuda_device() {
 template <class Element>
 void fill_pattern(std::vector<Element>& values) {
   for (int i = 0; i < int(values.size()); ++i) {
-    values[i] = autopartition::examples::from_float<Element>(
-        autopartition::examples::patterned_value(i));
+    values[i] = from_float<Element>(patterned_value(i));
   }
 }
 
 void fill_pattern(std::vector<float>& values) {
   for (int i = 0; i < int(values.size()); ++i) {
-    values[i] = autopartition::examples::patterned_value(i);
+    values[i] = patterned_value(i);
   }
 }
 
@@ -295,8 +308,7 @@ TEST(AutoPartitionerSm1xxPhase2, AlignmentFallbackUsesCpAsyncAndRunsOnEightByteV
     for (int m = 0; m < M; ++m) {
       int idx = m + k * M;
       max_diff = std::max(max_diff,
-          std::abs(autopartition::examples::to_float(hOut[idx]) -
-                   autopartition::examples::to_float(hA[idx + 4])));
+          std::abs(to_float(hOut[idx]) - to_float(hA[idx + 4])));
     }
   }
   EXPECT_LT(max_diff, 1.0e-5f);
@@ -360,6 +372,9 @@ TEST(AutoPartitionerSm1xxPhase4, TmemEpilogueConnectivityAndClusterWriterGuard) 
   using PartC = typename autopartition::AutoPartitioner<
       cutlass::arch::Sm100, cutlass::arch::OpClassTensorOp, Element,
       StrideC, Tile, 128, float, 16, 16, 16, Cluster>::RoleC;
+  using FloatPartC = typename autopartition::AutoPartitioner<
+      cutlass::arch::Sm100, cutlass::arch::OpClassTensorOp, float,
+      StrideC, Tile, 128, float, 16, 16, 16, Cluster>::RoleC;
 
   static_assert(cute::is_base_of<cute::UMMA::tmem_frg_base, typename PartC::TiledMma::FrgTypeC>::value,
       "SM100 TensorOp accumulator fragment must be backed by TMEM.");
@@ -383,6 +398,22 @@ TEST(AutoPartitionerSm1xxPhase4, TmemEpilogueConnectivityAndClusterWriterGuard) 
       "SM100 RoleC must expose official register-to-shared copy op.");
   static_assert(!std::is_void<typename PartC::SharedToGlobalCopyOperation>::value,
       "SM100 RoleC must expose official shared-to-global copy op.");
+  static_assert(PartC::HasFusionSharedMapping,
+      "SM100 RoleC must expose the unified fusion shared-memory contract.");
+  static_assert(PartC::HasRegisterReuseMapping,
+      "SM100 RoleC must expose the unified register-reuse contract.");
+  static_assert(!PartC::CanReuseAccumulatorAsOperand,
+      "FP16 SM100 accumulators are FP32 and cannot become FP16 A/B without explicit conversion.");
+  static_assert(FloatPartC::CanReuseAccumulatorAsOperand,
+      "FP32 SM100 accumulators can be retiled as FP32 A/B operands without conversion.");
+  static_assert(!std::is_void<typename FloatPartC::AccumulatorRegisterLayout>::value,
+      "SM100 RoleC must expose accumulator register layout metadata.");
+  static_assert(!std::is_void<typename FloatPartC::RegisterReuseAsALayout>::value,
+      "SM100 RoleC must expose next-A register layout metadata.");
+  static_assert(!std::is_void<typename FloatPartC::RegisterReuseAsBLayout>::value,
+      "SM100 RoleC must expose next-B register layout metadata.");
+  static_assert(std::is_same<typename PartC::FusionElement, typename PartC::EpilogueElement>::value,
+      "SM100 fusion shared staging must preserve accumulator element type.");
 
   if (!has_cuda_device()) {
     GTEST_SKIP() << "CUDA device not available.";
