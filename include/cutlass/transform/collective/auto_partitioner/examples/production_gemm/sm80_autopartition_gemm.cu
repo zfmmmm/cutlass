@@ -434,24 +434,30 @@ int main(int argc, char **argv)
     std::vector<InputElement>  hB(padded_n * padded_k);
     std::vector<OutputElement> hC(padded_m * padded_n, OutputElement{});
     std::vector<float>         hRef(options.m * options.n);
-    autopartition_bench::fill_a_b_padded(hA, hB, options.m, options.n, options.k, padded_m, padded_n, padded_k);
-    autopartition_bench::print_hashes(autopartition_bench::vector_hash(hA), autopartition_bench::vector_hash(hB));
-    if (options.verify) {
-        autopartition_bench::reference_gemm_kn(hA, hB, hRef, options.m, options.n, options.k, padded_n, padded_k);
+    {
+        autopartition_bench::NvtxRange range("input-initialize");
+        autopartition_bench::fill_a_b_padded(hA, hB, options.m, options.n, options.k, padded_m, padded_n, padded_k);
+        autopartition_bench::print_hashes(autopartition_bench::vector_hash(hA), autopartition_bench::vector_hash(hB));
+        if (options.verify) {
+            autopartition_bench::reference_gemm_kn(hA, hB, hRef, options.m, options.n, options.k, padded_n, padded_k);
+        }
     }
 
     InputElement  *dA = nullptr;
     InputElement  *dB = nullptr;
     OutputElement *dC = nullptr;
-    if (!autopartition_bench::check_cuda(cudaMalloc(&dA, hA.size() * sizeof(InputElement)), "cudaMalloc(A)")
-        || !autopartition_bench::check_cuda(cudaMalloc(&dB, hB.size() * sizeof(InputElement)), "cudaMalloc(B)")
-        || !autopartition_bench::check_cuda(cudaMalloc(&dC, hC.size() * sizeof(OutputElement)), "cudaMalloc(C)")
-        || !autopartition_bench::check_cuda(
-            cudaMemcpy(dA, hA.data(), hA.size() * sizeof(InputElement), cudaMemcpyHostToDevice), "copy A")
-        || !autopartition_bench::check_cuda(
-            cudaMemcpy(dB, hB.data(), hB.size() * sizeof(InputElement), cudaMemcpyHostToDevice), "copy B")
-        || !autopartition_bench::check_cuda(cudaMemset(dC, 0, hC.size() * sizeof(OutputElement)), "zero C")) {
-        return 1;
+    {
+        autopartition_bench::NvtxRange range("device-setup");
+        if (!autopartition_bench::check_cuda(cudaMalloc(&dA, hA.size() * sizeof(InputElement)), "cudaMalloc(A)")
+            || !autopartition_bench::check_cuda(cudaMalloc(&dB, hB.size() * sizeof(InputElement)), "cudaMalloc(B)")
+            || !autopartition_bench::check_cuda(cudaMalloc(&dC, hC.size() * sizeof(OutputElement)), "cudaMalloc(C)")
+            || !autopartition_bench::check_cuda(
+                cudaMemcpy(dA, hA.data(), hA.size() * sizeof(InputElement), cudaMemcpyHostToDevice), "copy A")
+            || !autopartition_bench::check_cuda(
+                cudaMemcpy(dB, hB.data(), hB.size() * sizeof(InputElement), cudaMemcpyHostToDevice), "copy B")
+            || !autopartition_bench::check_cuda(cudaMemset(dC, 0, hC.size() * sizeof(OutputElement)), "zero C")) {
+            return 1;
+        }
     }
 
     dim3 grid(padded_m / int(size<0>(TileShape{})), padded_n / int(size<1>(TileShape{})));
@@ -477,22 +483,34 @@ int main(int argc, char **argv)
         return autopartition_bench::check_cuda(cudaGetLastError(), "launch SM80 AutoPartitioner GEMM");
     };
 
-    if (!launch()) {
-        return 1;
+    {
+        autopartition_bench::NvtxRange range("correctness-launch");
+        if (!launch()) {
+            return 1;
+        }
+        if (!autopartition_bench::check_cuda(cudaDeviceSynchronize(), "SM80 GEMM kernel")) {
+            return 1;
+        }
     }
-    if (!autopartition_bench::check_cuda(cudaDeviceSynchronize(), "SM80 GEMM kernel")) {
-        return 1;
-    }
-    if (!autopartition_bench::check_cuda(
-            cudaMemcpy(hC.data(), dC, hC.size() * sizeof(OutputElement), cudaMemcpyDeviceToHost), "copy C")) {
-        return 1;
+    {
+        autopartition_bench::NvtxRange range("result-copy");
+        if (!autopartition_bench::check_cuda(
+                cudaMemcpy(hC.data(), dC, hC.size() * sizeof(OutputElement), cudaMemcpyDeviceToHost), "copy C")) {
+            return 1;
+        }
     }
 
-    autopartition_bench::OutputStats stats = autopartition_bench::output_stats_active(hC, options.m, options.n, padded_n);
-    float max_diff =
-        options.verify ? autopartition_bench::max_abs_diff_active(hC, hRef, options.m, options.n, padded_n) : 0.0f;
+    autopartition_bench::OutputStats stats{};
+    float                            max_diff = 0.0f;
+    {
+        autopartition_bench::NvtxRange range("verification");
+        stats = autopartition_bench::output_stats_active(hC, options.m, options.n, padded_n);
+        max_diff =
+            options.verify ? autopartition_bench::max_abs_diff_active(hC, hRef, options.m, options.n, padded_n) : 0.0f;
+    }
     float ms = 0.0f;
-    if (!autopartition_bench::time_launch_ms(launch, options.warmup, options.iterations, ms)) {
+    if (!autopartition_bench::time_launch_ms(
+            launch, options.warmup, options.iterations, ms, "warmup", "timed")) {
         return 1;
     }
     autopartition_bench::print_output_stats(stats);
@@ -503,12 +521,15 @@ int main(int argc, char **argv)
     float *dProbeIn = nullptr, *dProbeOut = nullptr;
     float  hProbeIn  = std::numeric_limits<float>::quiet_NaN();
     float  hProbeOut = std::numeric_limits<float>::quiet_NaN();
-    check_cuda(cudaMalloc(&dProbeIn, sizeof(float)), "cudaMalloc(zfill in)");
-    check_cuda(cudaMalloc(&dProbeOut, sizeof(float)), "cudaMalloc(zfill out)");
-    check_cuda(cudaMemcpy(dProbeIn, &hProbeIn, sizeof(float), cudaMemcpyHostToDevice), "copy zfill in");
-    sm80_cp_async_zfill_probe_kernel<<<1, 32>>>(dProbeIn, dProbeOut);
-    check_cuda(cudaDeviceSynchronize(), "SM80 ZFILL probe");
-    check_cuda(cudaMemcpy(&hProbeOut, dProbeOut, sizeof(float), cudaMemcpyDeviceToHost), "copy zfill out");
+    {
+        autopartition_bench::NvtxRange range("cp.async-zfill-probe");
+        check_cuda(cudaMalloc(&dProbeIn, sizeof(float)), "cudaMalloc(zfill in)");
+        check_cuda(cudaMalloc(&dProbeOut, sizeof(float)), "cudaMalloc(zfill out)");
+        check_cuda(cudaMemcpy(dProbeIn, &hProbeIn, sizeof(float), cudaMemcpyHostToDevice), "copy zfill in");
+        sm80_cp_async_zfill_probe_kernel<<<1, 32>>>(dProbeIn, dProbeOut);
+        check_cuda(cudaDeviceSynchronize(), "SM80 ZFILL probe");
+        check_cuda(cudaMemcpy(&hProbeOut, dProbeOut, sizeof(float), cudaMemcpyDeviceToHost), "copy zfill out");
+    }
     std::cout << "  cp.async_zfill_false_predicate = " << hProbeOut << "\n";
     print_ncu_hint("./sm80_autopartition_gemm", "--print-layouts");
 

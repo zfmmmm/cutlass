@@ -7,12 +7,23 @@
 #include <cstring>
 #include <cuda_runtime.h>
 #include <iostream>
+#include <nvtx3/nvToolsExt.h>
 #include <random>
 #include <vector>
 
 #include "cutlass/numeric_conversion.h"
 
 namespace autopartition_bench {
+
+class NvtxRange
+{
+public:
+    explicit NvtxRange(char const *name) { nvtxRangePushA(name); }
+    ~NvtxRange() { nvtxRangePop(); }
+
+    NvtxRange(NvtxRange const &) = delete;
+    NvtxRange &operator=(NvtxRange const &) = delete;
+};
 
 struct GemmOptions
 {
@@ -199,15 +210,23 @@ OutputStats output_stats_active(std::vector<ElementC> const &actual, int m, int 
 }
 
 template <class Launch>
-bool time_launch_ms(Launch launch, int warmup, int iterations, float &elapsed_ms_out)
+bool time_launch_ms(Launch      launch,
+                    int         warmup,
+                    int         iterations,
+                    float      &elapsed_ms_out,
+                    char const *warmup_range,
+                    char const *timed_range)
 {
-    for (int i = 0; i < warmup; ++i) {
-        if (!launch()) {
+    {
+        NvtxRange range(warmup_range);
+        for (int i = 0; i < warmup; ++i) {
+            if (!launch()) {
+                return false;
+            }
+        }
+        if (!check_cuda(cudaDeviceSynchronize(), "cudaDeviceSynchronize(warmup)")) {
             return false;
         }
-    }
-    if (!check_cuda(cudaDeviceSynchronize(), "cudaDeviceSynchronize(warmup)")) {
-        return false;
     }
 
     cudaEvent_t start{};
@@ -216,24 +235,27 @@ bool time_launch_ms(Launch launch, int warmup, int iterations, float &elapsed_ms
         || !check_cuda(cudaEventCreate(&stop), "cudaEventCreate(stop)")) {
         return false;
     }
-    if (!check_cuda(cudaEventRecord(start), "cudaEventRecord(start)")) {
-        cudaEventDestroy(start);
-        cudaEventDestroy(stop);
-        return false;
-    }
-    for (int i = 0; i < iterations; ++i) {
-        if (!launch()) {
+    {
+        NvtxRange range(timed_range);
+        if (!check_cuda(cudaEventRecord(start), "cudaEventRecord(start)")) {
             cudaEventDestroy(start);
             cudaEventDestroy(stop);
             return false;
         }
-    }
-    if (!check_cuda(cudaEventRecord(stop), "cudaEventRecord(stop)")
-        || !check_cuda(cudaEventSynchronize(stop), "cudaEventSynchronize(stop)")
-        || !check_cuda(cudaGetLastError(), "cudaGetLastError(timed launch)")) {
-        cudaEventDestroy(start);
-        cudaEventDestroy(stop);
-        return false;
+        for (int i = 0; i < iterations; ++i) {
+            if (!launch()) {
+                cudaEventDestroy(start);
+                cudaEventDestroy(stop);
+                return false;
+            }
+        }
+        if (!check_cuda(cudaEventRecord(stop), "cudaEventRecord(stop)")
+            || !check_cuda(cudaEventSynchronize(stop), "cudaEventSynchronize(stop)")
+            || !check_cuda(cudaGetLastError(), "cudaGetLastError(timed launch)")) {
+            cudaEventDestroy(start);
+            cudaEventDestroy(stop);
+            return false;
+        }
     }
 
     float elapsed_ms = 0.0f;
