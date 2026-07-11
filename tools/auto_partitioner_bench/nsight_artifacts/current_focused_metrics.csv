@@ -1,0 +1,3 @@
+implementation,duration_us,registers_per_thread,static_smem_kib,achieved_occupancy_pct,sm_throughput_pct,tensor_active_pct,tensor_inst,one_or_more_eligible_pct,active_warps_per_scheduler,eligible_warps_per_scheduler,warp_cycles_per_issued_inst,barrier_stall_pct,long_scoreboard_pct,short_scoreboard_pct,math_pipe_throttle_pct,mio_throttle_pct,shared_ld_conflicts,shared_st_conflicts
+autopartitioner,430.82,96,16.38,39.77,45.35,46.57,4194304,10.68,4.77,0.17,44.68,22.55,15.85,1.04,41.55,4.06,47310,7491
+official_cutlass,421.89,128,0.00,32.19,46.40,47.58,4194304,12.33,3.87,0.18,31.36,25.07,7.15,1.71,44.03,4.49,32334,600110

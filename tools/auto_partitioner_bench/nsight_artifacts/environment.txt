@@ -1,0 +1,19 @@
+测试时间: 2026-07-11
+GPU: NVIDIA GeForce RTX 5060 Ti
+Compute capability: 12.0 (SM120)
+显存: 16311 MiB
+驱动: 580.142
+功耗上限: 180.00 W
+最大 SM 时钟: 3120 MHz
+最大显存时钟: 14001 MHz
+CUDA Toolkit: 13.0, nvcc V13.0.48
+Nsight Systems: 2025.3.2.367
+Nsight Compute: 2025.3.0.0 build 36273991
+Linux: Ubuntu, kernel 6.17.0-23-generic
+CPU process-tree profiling: 可用
+CPU system-wide profiling: 不可用（非 root，kernel.perf_event_paranoid=1）
+
+边界说明:
+sm80_autopartition_gemm 使用 SM80 风格 mma.sync/ldmatrix/cp.async 实现，
+但本次由 --generate-code=arch=compute_120,code=sm_120 编译并运行在 SM120。
+以下结果不是 A100 或 RTX 30 系列原生 SM80 性能。
