@@ -1,0 +1,3 @@
+
+========== v02_fx_backend ==========
+CPU fallback capture output shape = (16, 64)

@@ -1,0 +1,3 @@
+
+========== v05_autopartition_extension ==========
+extension 编译/加载成功: <module 'autopartition_torch_runtime' from '/home/zfm/.cache/autopartition_torch_backend/torch_extensions/autopartition_torch_runtime.so'>

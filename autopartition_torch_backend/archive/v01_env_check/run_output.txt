@@ -1,0 +1,12 @@
+
+========== v01_env_check ==========
+python_executable: /home/zfm/Desktop/qwen_quant/qwen35_quant_vllm/.venv/bin/python
+torch_version: 2.11.0+cu130
+torch_cuda_available: True
+torch_cuda_version: 13.0
+gpu_name: NVIDIA GeForce RTX 5060 Ti
+compute_capability: (12, 0)
+triton_version: 3.6.0
+nvcc_path: /usr/local/cuda/bin/nvcc
+cutlass_include_exists: True
+autopartitioner_reference_exists: True

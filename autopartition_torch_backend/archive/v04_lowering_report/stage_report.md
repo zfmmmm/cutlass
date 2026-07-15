@@ -1,0 +1,1 @@
+阶段四完成：FusionPlan 已 lowering 到 TensorContract、AutoPartitionPlan 和 backend legalize 记录。

@@ -23,15 +23,34 @@ Y = gelu((A @ B + bias) * scale)
 
 ## 文件说明
 
-- `ir.py`：最小 `Tensor`、`Node`、`Graph`，支持 `placeholder/scalar/matmul/add/mul/gelu` 和 IR 打印。
-- `passes.py`：shape inference、dtype inference、canonicalize、dead code elimination、GEMM epilogue fusion。
-- `lowering.py`：把 `fused_gemm_epilogue` lowering 成 `LoweredGemmEpilogueOp`。
-- `backends.py`：Torch reference、Triton fused kernel、AutoPartition plan backend。
-- `compiler.py`：串起完整编译和执行流程。
-- `demo.py`：固定 `M=N=K=1024` 的可运行入口。
+为了学习时不用在很多文件之间跳转，现在 Python 主流程只保留三个核心文件：
+
+- `demo.py`：固定 `M=N=K=1024` 的可运行入口，创建输入 tensor，调用 tiny frontend 构图，再进入编译流程。
+- `compiler.py`：从上到下放在一个文件里：`Tensor/Node/Graph`、构图、pass、fusion、`LoweredGemmEpilogueOp`、lowering、backend legality、运行、correctness、benchmark。
+- `backends.py`：Torch reference、Triton fused kernel、AutoPartition plan backend、AutoPartition CUDA backend。
 - `autopartition_sm80_probe.cu`：最小 C++ adapter，实例化仓库里的 `autopartition::AutoPartitioner` 并打印 RoleA/RoleB/RoleC 计划。
 - `autopartition_sm80_runtime.cu`：PyTorch CUDA extension backend，使用 AutoPartitioner RoleA/RoleB/RoleC 执行真实 GEMM，并把结果返回 Python。
 - `test_compiler_flow.py`：轻量行为测试，覆盖 IR、fusion、lowering 和 AutoPartition plan。
+
+建议先忽略 `__init__.py` 和测试文件。真正学习 lowering 主线时，按下面顺序看。
+
+## 学习顺序
+
+1. `README.md`：先看目标和边界，记住这个 demo 只讲一条固定表达式的 lowering 闭环。
+2. `demo.py`：看真实入口。重点是它没有直接把 PyTorch 表达式当主流程，而是先用 `build_demo_graph(M, N, K)` 构造自己的 GraphIR。
+3. `compiler.py` 前半段：看 `Tensor`、`Node`、`Graph` 和 `build_demo_graph`。这里对应“高层表达式 -> GraphIR”。
+4. `compiler.py` 中段：看 `run_passes`、`infer_shapes`、`infer_dtypes`、`eliminate_dead_code`、`fuse_gemm_epilogue`。重点是 pattern：
+
+```text
+gelu(mul(add(matmul(A, B), bias), scale))
+    -> fused_gemm_epilogue(A, B, bias, scale)
+```
+
+5. `compiler.py` 后半段：看 `LoweredGemmEpilogueOp` 和 `lower_graph`。这里把图节点变成后端合同，明确 `M/N/K`、dtype、layout、acc dtype、tile shape、target SM。
+6. `compiler.py` 的 `compile` 函数：按打印顺序看完整流程：Original GraphIR、Optimized GraphIR、LoweredIR、Backend Legality、AutoPartition Plan、执行、正确性、benchmark。
+7. `backends.py`：先看 `TorchReferenceBackend`，再看 `TritonFusedGemmBackend`，最后看 `AutoPartitionBackend` 和 `AutoPartitionCudaBackend`。重点是后端只消费 `LoweredGemmEpilogueOp`，不关心高层图怎么来的。
+8. `autopartition_sm80_probe.cu`：看 plan 路径如何实例化你的 `AutoPartitioner`，并把 RoleA/RoleB/RoleC 的选择打印回 Python。
+9. `autopartition_sm80_runtime.cu`：看真实 CUDA 计算路径。它用 AutoPartitioner 的 RoleA/RoleB/RoleC 做 GEMM 主计算，再用一个小 epilogue kernel 做 bias、scale、GELU、fp16 写回。
 
 ## GraphIR 是什么
 
@@ -48,7 +67,7 @@ GraphIR 是这个 demo 自己定义的小计算图。它只表达算子依赖和
 
 ## Pass 做了什么
 
-`passes.py` 中的核心 pass 是 pattern fusion。它只识别这一种模式：
+`compiler.py` 中的核心 pass 是 pattern fusion。它只识别这一种模式：
 
 ```text
 gelu(mul(add(matmul(A, B), bias), scale))
@@ -67,7 +86,7 @@ gelu(mul(add(matmul(A, B), bias), scale))
 
 ## Lowering 做了什么
 
-`lowering.py` 把 fused node 变成 `LoweredGemmEpilogueOp`，记录：
+`compiler.py` 里的 `lower_graph` 把 fused node 变成 `LoweredGemmEpilogueOp`，记录：
 
 - `M/N/K`
 - A/B/bias/scale/out dtype

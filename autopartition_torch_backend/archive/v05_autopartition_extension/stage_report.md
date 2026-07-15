@@ -1,0 +1,1 @@
+阶段五完成：已尝试编译 AutoPartitioner CUDA extension；失败会写入 debug_log 并由运行阶段 fallback。

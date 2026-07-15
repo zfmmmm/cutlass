@@ -1,0 +1,14 @@
+/home/zfm/Desktop/cutlass/autopartition_mlir_backend/tools/build/CMakeFiles/intrinsics_gen.dir
+/home/zfm/Desktop/cutlass/autopartition_mlir_backend/tools/build/CMakeFiles/vt_gen.dir
+/home/zfm/Desktop/cutlass/autopartition_mlir_backend/tools/build/CMakeFiles/omp_gen.dir
+/home/zfm/Desktop/cutlass/autopartition_mlir_backend/tools/build/CMakeFiles/acc_gen.dir
+/home/zfm/Desktop/cutlass/autopartition_mlir_backend/tools/build/CMakeFiles/ARMTargetParserTableGen.dir
+/home/zfm/Desktop/cutlass/autopartition_mlir_backend/tools/build/CMakeFiles/AArch64TargetParserTableGen.dir
+/home/zfm/Desktop/cutlass/autopartition_mlir_backend/tools/build/CMakeFiles/RISCVTargetParserTableGen.dir
+/home/zfm/Desktop/cutlass/autopartition_mlir_backend/tools/build/CMakeFiles/mlir-tablegen-targets.dir
+/home/zfm/Desktop/cutlass/autopartition_mlir_backend/tools/build/CMakeFiles/mlir-headers.dir
+/home/zfm/Desktop/cutlass/autopartition_mlir_backend/tools/build/CMakeFiles/mlir-generic-headers.dir
+/home/zfm/Desktop/cutlass/autopartition_mlir_backend/tools/build/CMakeFiles/mlir-doc.dir
+/home/zfm/Desktop/cutlass/autopartition_mlir_backend/tools/build/CMakeFiles/autopartition-opt.dir
+/home/zfm/Desktop/cutlass/autopartition_mlir_backend/tools/build/CMakeFiles/edit_cache.dir
+/home/zfm/Desktop/cutlass/autopartition_mlir_backend/tools/build/CMakeFiles/rebuild_cache.dir

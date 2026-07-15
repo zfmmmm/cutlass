@@ -1,0 +1,1 @@
+阶段六完成：torch.compile compiled callable 已按 legalize 结果路由到 AutoPartition 或 PyTorch fallback。

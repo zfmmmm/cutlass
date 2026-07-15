@@ -1,0 +1,1 @@
+阶段三完成：已识别 GEMM_BIAS_GELU 和 MLP_TWO_GEMM，并记录 FusionPlan。

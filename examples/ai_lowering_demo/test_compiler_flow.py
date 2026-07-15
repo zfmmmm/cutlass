@@ -3,9 +3,7 @@
 import unittest
 
 from zfm_compiler_demo.backends import AutoPartitionBackend, AutoPartitionCudaBackend
-from zfm_compiler_demo.ir import Graph
-from zfm_compiler_demo.lowering import lower_graph
-from zfm_compiler_demo.passes import run_passes
+from zfm_compiler_demo.compiler import Graph, lower_graph, run_passes
 
 
 class TinyCompilerFlowTest(unittest.TestCase):

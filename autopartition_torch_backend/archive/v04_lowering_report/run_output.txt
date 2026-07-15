@@ -1,0 +1,4 @@
+
+========== v04_lowering_report ==========
+TensorContract M/N/K = 128/256/64
+AutoPartitionPlan target=sm80, actual=sm120, legal=False

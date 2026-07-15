@@ -9,8 +9,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from .lowering import LoweredGemmEpilogueOp
-
 
 @dataclass
 class BackendStatus:
@@ -25,7 +23,7 @@ class BackendStatus:
 class TorchReferenceBackend:
     name = "TorchReferenceBackend"
 
-    def legality(self, op: LoweredGemmEpilogueOp) -> BackendStatus:
+    def legality(self, op: Any) -> BackendStatus:
         if op.op != "fused_gemm_epilogue":
             return BackendStatus(self.name, "illegal", "unsupported op")
         try:
@@ -34,7 +32,7 @@ class TorchReferenceBackend:
             return BackendStatus(self.name, "unavailable", f"torch import failed: {exc}")
         return BackendStatus(self.name, "legal")
 
-    def run(self, op: LoweredGemmEpilogueOp, inputs: dict[str, Any]):
+    def run(self, op: Any, inputs: dict[str, Any]):
         import torch
         import torch.nn.functional as F
 
@@ -45,7 +43,7 @@ class TorchReferenceBackend:
         out = F.gelu((a @ b + bias) * scale)
         return out.to(_torch_dtype(torch, op.dtype_out))
 
-    def benchmark(self, op: LoweredGemmEpilogueOp, inputs: dict[str, Any], warmup: int, repeats: int) -> float:
+    def benchmark(self, op: Any, inputs: dict[str, Any], warmup: int, repeats: int) -> float:
         import torch
 
         return _time_cuda_or_cpu(lambda: self.run(op, inputs), torch, warmup, repeats)
@@ -54,7 +52,7 @@ class TorchReferenceBackend:
 class TritonFusedGemmBackend:
     name = "TritonFusedGemmBackend"
 
-    def legality(self, op: LoweredGemmEpilogueOp) -> BackendStatus:
+    def legality(self, op: Any) -> BackendStatus:
         if op.op != "fused_gemm_epilogue":
             return BackendStatus(self.name, "illegal", "unsupported op")
         if (op.dtype_a, op.dtype_b, op.dtype_out, op.acc_dtype) != ("fp16", "fp16", "fp16", "fp32"):
@@ -70,7 +68,7 @@ class TritonFusedGemmBackend:
             return BackendStatus(self.name, "unavailable", "triton.language.erf is required for exact GELU")
         return BackendStatus(self.name, "legal")
 
-    def run(self, op: LoweredGemmEpilogueOp, inputs: dict[str, Any]):
+    def run(self, op: Any, inputs: dict[str, Any]):
         import torch
         import triton
 
@@ -98,7 +96,7 @@ class TritonFusedGemmBackend:
         )
         return out
 
-    def benchmark(self, op: LoweredGemmEpilogueOp, inputs: dict[str, Any], warmup: int, repeats: int) -> float:
+    def benchmark(self, op: Any, inputs: dict[str, Any], warmup: int, repeats: int) -> float:
         import torch
 
         return _time_cuda_or_cpu(lambda: self.run(op, inputs), torch, warmup, repeats)
@@ -107,7 +105,7 @@ class TritonFusedGemmBackend:
 class AutoPartitionCudaBackend:
     name = "AutoPartitionCudaBackend"
 
-    def legality(self, op: LoweredGemmEpilogueOp) -> BackendStatus:
+    def legality(self, op: Any) -> BackendStatus:
         if op.op != "fused_gemm_epilogue":
             return BackendStatus(self.name, "illegal", "unsupported op")
         if (op.dtype_a, op.dtype_b, op.dtype_bias, op.dtype_out, op.acc_dtype) != (
@@ -135,7 +133,7 @@ class AutoPartitionCudaBackend:
             return BackendStatus(self.name, "unavailable", "AutoPartition runtime extension source not found")
         return BackendStatus(self.name, "legal")
 
-    def run(self, _op: LoweredGemmEpilogueOp, inputs: dict[str, Any]):
+    def run(self, _op: Any, inputs: dict[str, Any]):
         module = _load_autopartition_runtime_extension()
         return module.fused_gemm_bias_scale_gelu(
             inputs["A"].contiguous(),
@@ -144,7 +142,7 @@ class AutoPartitionCudaBackend:
             float(inputs["scale"]),
         )
 
-    def benchmark(self, op: LoweredGemmEpilogueOp, inputs: dict[str, Any], warmup: int, repeats: int) -> float:
+    def benchmark(self, op: Any, inputs: dict[str, Any], warmup: int, repeats: int) -> float:
         import torch
 
         return _time_cuda_or_cpu(lambda: self.run(op, inputs), torch, warmup, repeats)
@@ -246,12 +244,12 @@ class AutoPartitionBackend:
     def __init__(self, probe_runner: Callable[[AutoPartitionConfig], dict[str, str]] | None = None) -> None:
         self._probe_runner = probe_runner
 
-    def legality(self, op: LoweredGemmEpilogueOp) -> BackendStatus:
+    def legality(self, op: Any) -> BackendStatus:
         if op.op != "fused_gemm_epilogue":
             return BackendStatus(self.name, "illegal", "unsupported op")
         return BackendStatus(self.name, "plan_only")
 
-    def plan(self, op: LoweredGemmEpilogueOp) -> AutoPartitionPlan:
+    def plan(self, op: Any) -> AutoPartitionPlan:
         config = AutoPartitionConfig(
             M=op.M,
             N=op.N,

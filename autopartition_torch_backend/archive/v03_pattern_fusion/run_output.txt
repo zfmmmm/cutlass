@@ -1,0 +1,6 @@
+
+========== v03_pattern_fusion ==========
+GEMM_BIAS_GELU FusionPlan:
+{'plan_type': 'GEMM_BIAS_GELU', 'source_nodes': ['matmul', 'add', 'gelu'], 'covered_nodes': ['matmul', 'add', 'gelu'], 'A': 'x', 'B': 'w', 'bias': 'bias', 'activation': 'gelu', 'reason': 'matmul result only consumed by bias add, add result only consumed by gelu; fusion legal', 'runtime_strategy': 'AutoPartition GEMM mainloop plus CUDA bias+GELU epilogue', 'output_node': 'gelu', 'gemm_chains': [{'A': 'x', 'B': 'w', 'bias': 'bias', 'activation': 'gelu'}], 'weight_transposed': False}
+MLP_TWO_GEMM FusionPlan:
+{'plan_type': 'MLP_TWO_GEMM', 'source_nodes': ['matmul', 'add', 'gelu', 'matmul_1', 'add_1'], 'covered_nodes': ['matmul', 'add', 'gelu', 'matmul_1', 'add_1'], 'A': 'x', 'B': 'w1', 'bias': 'b1', 'activation': 'gelu', 'reason': 'linear1 feeds gelu, gelu feeds linear2, each intermediate has a single consumer; fusion legal as MLP_TWO_GEMM plan', 'runtime_strategy': 'two AutoPartition GEMM calls: fused_gemm_bias_gelu then fused_gemm_bias', 'output_node': 'add_1', 'gemm_chains': [{'A': 'x', 'B': 'w1', 'bias': 'b1', 'activation': 'gelu'}, {'A': 'hidden', 'B': 'w2', 'bias': 'b2', 'activation': 'none'}], 'weight_transposed': False}

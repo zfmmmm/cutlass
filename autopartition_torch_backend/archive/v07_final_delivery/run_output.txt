@@ -1,0 +1,12 @@
+
+========== v07_final_delivery ==========
+Benchmark shape M=1024, K=1024, N=1024
+compiled=1.0271 ms, reference=0.1852 ms, max_abs=3.05176e-05, passed=True
+triton=0.1011 ms, max_abs=3.05176e-05, passed=True
+Benchmark shape M=512, K=1024, N=2048
+compiled=1.0639 ms, reference=0.1910 ms, max_abs=3.05176e-05, passed=True
+triton=0.0974 ms, max_abs=3.05176e-05, passed=True
+Benchmark shape M=2048, K=1024, N=4096
+compiled=1.1247 ms, reference=1.7634 ms, max_abs=3.05176e-05, passed=True
+triton=0.8160 ms, max_abs=3.05176e-05, passed=True
+MLP_TWO_GEMM: 1.0366 ms, max_abs=6.10352e-05, passed=True
