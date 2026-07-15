@@ -25,7 +25,7 @@ This list represents real implementation attempts. Documentation-only commits, t
 
 All versions and the official baseline use the tutorial's controlled SM80 FP16 Tensor Core GEMM setup: identical M/N/K, input generation, strides, alpha/beta, output type, CTA/warp/instruction shape where the snapshot encodes it, one-stage pipeline, CUDA stream, warmup, iteration count, and synchronization boundary. The official comparator is `tools/auto_partitioner_bench/sm80_cutlass_official_gemm.cu`, not a three-stage or heuristic-selected profiler kernel.
 
-Correctness is mandatory before performance is accepted. Sizes 256 and 512 run CPU reference validation; all sizes compare deterministic input hashes and output statistics against the official implementation. A build or correctness failure is recorded as a result, never silently omitted.
+Correctness is mandatory before performance is accepted. Sizes 256 and 512 run CPU reference validation. v08 and latest expose deterministic input/output hashes for comparison with the official implementation; v00-v07 predate that instrumentation, so their larger skip-reference sizes explicitly record hash evidence as unavailable. The preserved kernels are not modified merely to manufacture newer telemetry. A build or correctness failure is recorded as a result, never silently omitted.
 
 ## Workloads and statistics
 
@@ -65,7 +65,7 @@ The final report separates compile failures, correctness failures, runtime failu
 
 - All v00-v08 snapshots and latest appear in the manifest.
 - The official single-stage baseline is built and measured with the same harness.
-- Every successful result passes deterministic correctness checks.
+- Every version passes its preserved correctness path at 256 and 512; v08/latest additionally match the official deterministic hash contract where emitted.
 - Every expected size has five raw samples unless its version failed, in which case a classified failure and log exist.
 - Summary numbers are derived from raw CSV, not typed manually.
 - Remote results and local copied-back results have matching content hashes.
