@@ -8,10 +8,20 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "tools/auto_partitioner_bench"))
 
-from build_history import compile_command, run_compile
+from build_history import compile_command, run_compile, safe_extract_tar
 
 
 class BuildHistoryTest(unittest.TestCase):
+    def test_tar_extraction_supports_python_38_signature(self):
+        calls = []
+
+        class Python38Tar:
+            def extractall(self, destination):
+                calls.append(destination)
+
+        safe_extract_tar(Python38Tar(), Path("legacy"))
+        self.assertEqual(calls, [Path("legacy")])
+
     def test_compile_command_targets_real_ampere(self):
         command = compile_command(
             nvcc=Path("/cuda/bin/nvcc"),

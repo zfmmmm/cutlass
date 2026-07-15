@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import os
 import subprocess
@@ -15,6 +16,16 @@ from history_manifest import discover_versions
 
 
 LEGACY_REVISION = "33a51510^"
+
+
+def safe_extract_tar(stream: tarfile.TarFile, destination: Path) -> None:
+    """Use the traversal-safe filter when the running Python provides it."""
+    parameters = inspect.signature(stream.extractall).parameters
+    if "filter" in parameters:
+        stream.extractall(destination, filter="data")
+    else:
+        # The archive is produced locally by `git archive`, not accepted from users.
+        stream.extractall(destination)
 
 
 def compile_command(
@@ -90,7 +101,7 @@ def extract_legacy_tree(repo: Path, destination: Path) -> str:
         check=True,
     )
     with tarfile.open(archive) as stream:
-        stream.extractall(destination, filter="data")
+        safe_extract_tar(stream, destination)
     archive.unlink()
     marker.write_text(revision + "\n")
     return revision
