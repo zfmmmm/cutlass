@@ -1,0 +1,82 @@
+[
+  {
+    "version": "v00",
+    "label": "baseline_single_stage",
+    "source": "tools/auto_partitioner_bench/snapshots/sm80_autopartition_gemm_v00_baseline_single_stage.cu",
+    "introducing_commit": "07ee9235d795d5750fc37f21ba3e159c54a4ac6e",
+    "sha256": "39a6af9379d24c21e85e6c930ee831adc327ffb4e3386cfdef3947e29c7a192b",
+    "binary_name": "sm80_autopartition_gemm_v00"
+  },
+  {
+    "version": "v01",
+    "label": "policy_tiled_g2s",
+    "source": "tools/auto_partitioner_bench/snapshots/sm80_autopartition_gemm_v01_policy_tiled_g2s.cu",
+    "introducing_commit": "07ee9235d795d5750fc37f21ba3e159c54a4ac6e",
+    "sha256": "0ee8c5b421a709f7bc82756640e897290020fd9fc1fddd2a559c326e401d81d3",
+    "binary_name": "sm80_autopartition_gemm_v01"
+  },
+  {
+    "version": "v02",
+    "label": "hoist_g2s_tiled_copy",
+    "source": "tools/auto_partitioner_bench/snapshots/sm80_autopartition_gemm_v02_hoist_g2s_tiled_copy.cu",
+    "introducing_commit": "07ee9235d795d5750fc37f21ba3e159c54a4ac6e",
+    "sha256": "c6f5eb10e0b9788f3df7c933abadc624444bf006532259a4a48850e2ea3a756d",
+    "binary_name": "sm80_autopartition_gemm_v02"
+  },
+  {
+    "version": "v03",
+    "label": "launch_bounds",
+    "source": "tools/auto_partitioner_bench/snapshots/sm80_autopartition_gemm_v03_launch_bounds.cu",
+    "introducing_commit": "07ee9235d795d5750fc37f21ba3e159c54a4ac6e",
+    "sha256": "e48207e44417caed84ab8a25e2f40f5beefdb689a3ca3d1cee4ab541791919d9",
+    "binary_name": "sm80_autopartition_gemm_v03"
+  },
+  {
+    "version": "v04",
+    "label": "launch_bounds_3cta",
+    "source": "tools/auto_partitioner_bench/snapshots/sm80_autopartition_gemm_v04_launch_bounds_3cta.cu",
+    "introducing_commit": "07ee9235d795d5750fc37f21ba3e159c54a4ac6e",
+    "sha256": "c41c589a131a7392c5c889e44f8342629e3094077e0a37e1a1deb4513dc8bb66",
+    "binary_name": "sm80_autopartition_gemm_v04"
+  },
+  {
+    "version": "v05",
+    "label": "launch_bounds_4cta",
+    "source": "tools/auto_partitioner_bench/snapshots/sm80_autopartition_gemm_v05_launch_bounds_4cta.cu",
+    "introducing_commit": "07ee9235d795d5750fc37f21ba3e159c54a4ac6e",
+    "sha256": "593258018e24c6305459e4dd59a1d1b52e5f74202acd3f85aca4e9eba5debd8e",
+    "binary_name": "sm80_autopartition_gemm_v05"
+  },
+  {
+    "version": "v06",
+    "label": "shared_union",
+    "source": "tools/auto_partitioner_bench/snapshots/sm80_autopartition_gemm_v06_shared_union.cu",
+    "introducing_commit": "07ee9235d795d5750fc37f21ba3e159c54a4ac6e",
+    "sha256": "6a1c9afbb1589a2c812e977f96faacb6ef0da917b87ffb8475907f1ee819f286",
+    "binary_name": "sm80_autopartition_gemm_v06"
+  },
+  {
+    "version": "v07",
+    "label": "epilogue_autoselect_contract",
+    "source": "tools/auto_partitioner_bench/snapshots/sm80_autopartition_gemm_v07_epilogue_autoselect_contract.cu",
+    "introducing_commit": "27d44ffc970e87558045a180b242e57958d8da0d",
+    "sha256": "dd6c37e79bc0bad4f8e747055b2fbed3d73e782e46c65513d0f0fbc3706b20e4",
+    "binary_name": "sm80_autopartition_gemm_v07"
+  },
+  {
+    "version": "v08",
+    "label": "fair_benchmark_baseline",
+    "source": "tools/auto_partitioner_bench/snapshots/sm80_autopartition_gemm_v08_fair_benchmark_baseline.cu",
+    "introducing_commit": "15394589212cb372d5cf128c5a38bad5f74349a5",
+    "sha256": "b7c9c5f7367b7cae781e49d6d511e754cd900b4074d06ecbd1be44b417144090",
+    "binary_name": "sm80_autopartition_gemm_v08"
+  },
+  {
+    "version": "latest",
+    "label": "current_production_head",
+    "source": "include/cutlass/transform/collective/auto_partitioner/examples/production_gemm/sm80_autopartition_gemm.cu",
+    "introducing_commit": "a9573ccf65a59639628b6fbcddf34b408fe75c33",
+    "sha256": "57a230709c6412994e20c40b1c06e60a9fee36f2c60c081fd79a3473d19470d1",
+    "binary_name": "sm80_autopartition_gemm_latest"
+  }
+]

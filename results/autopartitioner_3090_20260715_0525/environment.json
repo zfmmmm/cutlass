@@ -1,0 +1,8 @@
+{
+  "hostname": "80121ce05b18",
+  "platform": "Linux-5.15.0-139-generic-x86_64-with-glibc2.29",
+  "python": "3.8.10",
+  "git_head": "a9573ccf65a59639628b6fbcddf34b408fe75c33",
+  "gpu_query": "NVIDIA GeForce RTX 3090, GPU-5832a53b-5809-73bd-9b48-2cb479e6ea19, 24576 MiB, 580.142, 29, 350.00 W",
+  "nvcc": "nvcc: NVIDIA (R) Cuda compiler driver\nCopyright (c) 2005-2025 NVIDIA Corporation\nBuilt on Wed_Jul_16_07:30:01_PM_PDT_2025\nCuda compilation tools, release 13.0, V13.0.48\nBuild cuda_13.0.r13.0/compiler.36260728_0"
+}

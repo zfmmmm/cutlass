@@ -1,0 +1,11 @@
+{
+  "manifest_versions": 10,
+  "expected_versions_present": true,
+  "official_present": true,
+  "failures": 0,
+  "plots": [
+    "/home/zfm/Desktop/cutlass/results/autopartitioner_3090_20260715_0525/history_throughput.png",
+    "/home/zfm/Desktop/cutlass/results/autopartitioner_3090_20260715_0525/history_vs_official.png"
+  ],
+  "report": "/home/zfm/Desktop/cutlass/results/autopartitioner_3090_20260715_0525/AutoPartitioner_RTX3090_Report.md"
+}

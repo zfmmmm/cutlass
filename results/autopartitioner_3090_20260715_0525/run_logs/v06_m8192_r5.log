@@ -1,0 +1,12 @@
+COMMAND: /sxs/cutlass-autopartitioner-3090/results/autopartitioner_3090_20260715_0525/bin/sm80_autopartition_gemm_v06 --m=8192 --n=8192 --k=8192 --warmup=10 --iterations=50 --skip-reference
+
+SM80 AutoPartitioner cp.async/LDSM/mma.sync GEMM
+  logical_mnk = 8192x8192x8192
+  padded_mnk  = 8192x8192x8192
+  warmup/iters = 10/50
+  max_abs_diff = 0
+  runtime_ms   = 22.1847
+  tflops       = 49.5617
+  cp.async_zfill_false_predicate = 0
+NCU bank-conflict probe:
+  ncu --metrics l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum,l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum ./sm80_autopartition_gemm --print-layouts

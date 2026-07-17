@@ -1,0 +1,781 @@
+repo_root=/sxs/cutlass-autopartitioner-3090
+result_dir=/sxs/cutlass-autopartitioner-3090/results/autopartitioner_3090_20260715_0525
+started_utc=2026-07-15T10:23:14+00:00
+date_utc=2026-07-15T10:23:14+00:00
+hostname=80121ce05b18
+kernel=Linux 80121ce05b18 5.15.0-139-generic #149~20.04.1-Ubuntu SMP Wed Apr 16 08:29:56 UTC 2025 x86_64 x86_64 x86_64 GNU/Linux
+git_head=5ae30fd173286cde6f8340b88682d8a82749aebd
+git_status_begin
+?? results/
+git_status_end
+nvidia_smi_begin
+Wed Jul 15 05:23:14 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 580.142                Driver Version: 580.142        CUDA Version: 13.0     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GeForce RTX 3090        Off |   00000000:65:00.0 Off |                  N/A |
+| 49%   29C    P8             21W /  350W |      36MiB /  24576MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+nvidia_smi_end
+nvcc_begin
+nvcc: NVIDIA (R) Cuda compiler driver
+Copyright (c) 2005-2025 NVIDIA Corporation
+Built on Wed_Jul_16_07:30:01_PM_PDT_2025
+Cuda compilation tools, release 13.0, V13.0.48
+Build cuda_13.0.r13.0/compiler.36260728_0
+nvcc_end
+cmake=cmake version 3.16.3
+cxx=g++ (Ubuntu 9.4.0-1ubuntu1~20.04.2) 9.4.0
+python=Python 3.8.10
+disk_begin
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/sdc2       825G  520G  264G  67% /sxs
+disk_end
+Traceback (most recent call last):
+  File "/sxs/cutlass-autopartitioner-3090/tools/auto_partitioner_bench/build_history.py", line 167, in <module>
+    raise SystemExit(main())
+  File "/sxs/cutlass-autopartitioner-3090/tools/auto_partitioner_bench/build_history.py", line 120, in main
+    legacy_commit = extract_legacy_tree(repo, legacy)
+  File "/sxs/cutlass-autopartitioner-3090/tools/auto_partitioner_bench/build_history.py", line 93, in extract_legacy_tree
+    stream.extractall(destination, filter="data")
+TypeError: extractall() got an unexpected keyword argument 'filter'
+repo_root=/sxs/cutlass-autopartitioner-3090
+result_dir=/sxs/cutlass-autopartitioner-3090/results/autopartitioner_3090_20260715_0525
+started_utc=2026-07-15T10:23:59+00:00
+date_utc=2026-07-15T10:23:59+00:00
+hostname=80121ce05b18
+kernel=Linux 80121ce05b18 5.15.0-139-generic #149~20.04.1-Ubuntu SMP Wed Apr 16 08:29:56 UTC 2025 x86_64 x86_64 x86_64 GNU/Linux
+git_head=a9573ccf65a59639628b6fbcddf34b408fe75c33
+git_status_begin
+?? results/
+git_status_end
+nvidia_smi_begin
+Wed Jul 15 05:23:59 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 580.142                Driver Version: 580.142        CUDA Version: 13.0     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GeForce RTX 3090        Off |   00000000:65:00.0 Off |                  N/A |
+| 49%   29C    P8             21W /  350W |      36MiB /  24576MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+nvidia_smi_end
+nvcc_begin
+nvcc: NVIDIA (R) Cuda compiler driver
+Copyright (c) 2005-2025 NVIDIA Corporation
+Built on Wed_Jul_16_07:30:01_PM_PDT_2025
+Cuda compilation tools, release 13.0, V13.0.48
+Build cuda_13.0.r13.0/compiler.36260728_0
+nvcc_end
+cmake=cmake version 3.16.3
+cxx=g++ (Ubuntu 9.4.0-1ubuntu1~20.04.2) 9.4.0
+python=Python 3.8.10
+disk_begin
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/sdc2       825G  520G  264G  67% /sxs
+disk_end
+official_cutlass: success (8.057 sec)
+v00: success (26.811 sec)
+v01: success (27.164 sec)
+v02: success (27.367 sec)
+v03: success (27.252 sec)
+v04: success (27.45 sec)
+v05: success (27.169 sec)
+v06: success (27.326 sec)
+v07: success (27.821 sec)
+v08: success (28.013 sec)
+latest: success (30.716 sec)
+size=256 repeat=1/5 implementation=official_cutlass
+  status=success tflops=4.86172
+size=256 repeat=1/5 implementation=v00
+  status=success tflops=4.70805
+size=256 repeat=1/5 implementation=v01
+  status=success tflops=5.38947
+size=256 repeat=1/5 implementation=v02
+  status=success tflops=5.42517
+size=256 repeat=1/5 implementation=v03
+  status=success tflops=5.48533
+size=256 repeat=1/5 implementation=v04
+  status=success tflops=5.44771
+size=256 repeat=1/5 implementation=v05
+  status=success tflops=5.42517
+size=256 repeat=1/5 implementation=v06
+  status=success tflops=5.44545
+size=256 repeat=1/5 implementation=v07
+  status=success tflops=5.02577
+size=256 repeat=1/5 implementation=v08
+  status=success tflops=5.50087
+size=256 repeat=1/5 implementation=latest
+  status=success tflops=5.55861
+size=256 repeat=2/5 implementation=latest
+  status=success tflops=5.5165
+size=256 repeat=2/5 implementation=v08
+  status=success tflops=5.51128
+size=256 repeat=2/5 implementation=v07
+  status=success tflops=5.53513
+size=256 repeat=2/5 implementation=v06
+  status=success tflops=5.42741
+size=256 repeat=2/5 implementation=v05
+  status=success tflops=4.87846
+size=256 repeat=2/5 implementation=v04
+  status=success tflops=4.80469
+size=256 repeat=2/5 implementation=v03
+  status=success tflops=4.89075
+size=256 repeat=2/5 implementation=v02
+  status=success tflops=4.81882
+size=256 repeat=2/5 implementation=v01
+  status=success tflops=5.44602
+size=256 repeat=2/5 implementation=v00
+  status=success tflops=5.34007
+size=256 repeat=2/5 implementation=official_cutlass
+  status=success tflops=5.57279
+size=256 repeat=3/5 implementation=official_cutlass
+  status=success tflops=5.5539
+size=256 repeat=3/5 implementation=v00
+  status=success tflops=5.33681
+size=256 repeat=3/5 implementation=v01
+  status=success tflops=5.52173
+size=256 repeat=3/5 implementation=v02
+  status=success tflops=5.20437
+size=256 repeat=3/5 implementation=v03
+  status=success tflops=5.60916
+size=256 repeat=3/5 implementation=v04
+  status=success tflops=4.8871
+size=256 repeat=3/5 implementation=v05
+  status=success tflops=4.86172
+size=256 repeat=3/5 implementation=v06
+  status=success tflops=4.84734
+size=256 repeat=3/5 implementation=v07
+  status=success tflops=4.93494
+size=256 repeat=3/5 implementation=v08
+  status=success tflops=5.59181
+size=256 repeat=3/5 implementation=latest
+  status=success tflops=5.59002
+size=256 repeat=4/5 implementation=latest
+  status=success tflops=5.60736
+size=256 repeat=4/5 implementation=v08
+  status=success tflops=5.57694
+size=256 repeat=4/5 implementation=v07
+  status=success tflops=5.71244
+size=256 repeat=4/5 implementation=v06
+  status=success tflops=5.5592
+size=256 repeat=4/5 implementation=v05
+  status=success tflops=5.5539
+size=256 repeat=4/5 implementation=v04
+  status=success tflops=5.61276
+size=256 repeat=4/5 implementation=v03
+  status=success tflops=5.61096
+size=256 repeat=4/5 implementation=v02
+  status=success tflops=5.41228
+size=256 repeat=4/5 implementation=v01
+  status=success tflops=5.53513
+size=256 repeat=4/5 implementation=v00
+  status=success tflops=5.40726
+size=256 repeat=4/5 implementation=official_cutlass
+  status=success tflops=5.5539
+size=256 repeat=5/5 implementation=official_cutlass
+  status=success tflops=5.55861
+size=256 repeat=5/5 implementation=v00
+  status=success tflops=5.3718
+size=256 repeat=5/5 implementation=v01
+  status=success tflops=5.5539
+size=256 repeat=5/5 implementation=v02
+  status=success tflops=5.53513
+size=256 repeat=5/5 implementation=v03
+  status=success tflops=5.57279
+size=256 repeat=5/5 implementation=v04
+  status=success tflops=5.57279
+size=256 repeat=5/5 implementation=v05
+  status=success tflops=5.59181
+size=256 repeat=5/5 implementation=v06
+  status=success tflops=5.5539
+size=256 repeat=5/5 implementation=v07
+  status=success tflops=5.3718
+size=256 repeat=5/5 implementation=v08
+  status=success tflops=5.17049
+size=256 repeat=5/5 implementation=latest
+  status=success tflops=5.07245
+size=512 repeat=1/5 implementation=official_cutlass
+  status=success tflops=22.8747
+size=512 repeat=1/5 implementation=v00
+  status=success tflops=23.0266
+size=512 repeat=1/5 implementation=v01
+  status=success tflops=23.7449
+size=512 repeat=1/5 implementation=v02
+  status=success tflops=21.5934
+size=512 repeat=1/5 implementation=v03
+  status=success tflops=21.809
+size=512 repeat=1/5 implementation=v04
+  status=success tflops=21.7007
+size=512 repeat=1/5 implementation=v05
+  status=success tflops=21.7007
+size=512 repeat=1/5 implementation=v06
+  status=success tflops=21.7367
+size=512 repeat=1/5 implementation=v07
+  status=success tflops=23.8747
+size=512 repeat=1/5 implementation=v08
+  status=success tflops=23.9182
+size=512 repeat=1/5 implementation=latest
+  status=success tflops=24.9661
+size=512 repeat=2/5 implementation=latest
+  status=success tflops=25.0257
+size=512 repeat=2/5 implementation=v08
+  status=success tflops=21.7728
+size=512 repeat=2/5 implementation=v07
+  status=success tflops=21.8419
+size=512 repeat=2/5 implementation=v06
+  status=success tflops=21.6648
+size=512 repeat=2/5 implementation=v05
+  status=success tflops=22.178
+size=512 repeat=2/5 implementation=v04
+  status=success tflops=22.1839
+size=512 repeat=2/5 implementation=v03
+  status=success tflops=21.6558
+size=512 repeat=2/5 implementation=v02
+  status=success tflops=21.5934
+size=512 repeat=2/5 implementation=v01
+  status=success tflops=21.4938
+size=512 repeat=2/5 implementation=v00
+  status=success tflops=20.9098
+size=512 repeat=2/5 implementation=official_cutlass
+  status=success tflops=26.008
+size=512 repeat=3/5 implementation=official_cutlass
+  status=success tflops=26.0112
+size=512 repeat=3/5 implementation=v00
+  status=success tflops=20.938
+size=512 repeat=3/5 implementation=v01
+  status=success tflops=23.364
+size=512 repeat=3/5 implementation=v02
+  status=success tflops=23.702
+size=512 repeat=3/5 implementation=v03
+  status=success tflops=23.8367
+size=512 repeat=3/5 implementation=v04
+  status=success tflops=21.5934
+size=512 repeat=3/5 implementation=v05
+  status=success tflops=24.4082
+size=512 repeat=3/5 implementation=v06
+  status=success tflops=24.4537
+size=512 repeat=3/5 implementation=v07
+  status=success tflops=21.8453
+size=512 repeat=3/5 implementation=v08
+  status=success tflops=24.4537
+size=512 repeat=3/5 implementation=latest
+  status=success tflops=24.5453
+size=512 repeat=4/5 implementation=latest
+  status=success tflops=21.809
+size=512 repeat=4/5 implementation=v08
+  status=success tflops=21.8476
+size=512 repeat=4/5 implementation=v07
+  status=success tflops=23.9237
+size=512 repeat=4/5 implementation=v06
+  status=success tflops=23.7047
+size=512 repeat=4/5 implementation=v05
+  status=success tflops=21.5579
+size=512 repeat=4/5 implementation=v04
+  status=success tflops=21.629
+size=512 repeat=4/5 implementation=v03
+  status=success tflops=23.0355
+size=512 repeat=4/5 implementation=v02
+  status=success tflops=22.866
+size=512 repeat=4/5 implementation=v01
+  status=success tflops=21.417
+size=512 repeat=4/5 implementation=v00
+  status=success tflops=22.6768
+size=512 repeat=4/5 implementation=official_cutlass
+  status=success tflops=24.7306
+size=512 repeat=5/5 implementation=official_cutlass
+  status=success tflops=22.7469
+size=512 repeat=5/5 implementation=v00
+  status=success tflops=20.9715
+size=512 repeat=5/5 implementation=v01
+  status=success tflops=21.5269
+size=512 repeat=5/5 implementation=v02
+  status=success tflops=21.5579
+size=512 repeat=5/5 implementation=v03
+  status=success tflops=21.7007
+size=512 repeat=5/5 implementation=v04
+  status=success tflops=22.178
+size=512 repeat=5/5 implementation=v05
+  status=success tflops=22.1405
+size=512 repeat=5/5 implementation=v06
+  status=success tflops=21.5579
+size=512 repeat=5/5 implementation=v07
+  status=success tflops=22.4823
+size=512 repeat=5/5 implementation=v08
+  status=success tflops=22.3672
+size=512 repeat=5/5 implementation=latest
+  status=success tflops=21.809
+size=1024 repeat=1/5 implementation=official_cutlass
+  status=success tflops=43.9482
+size=1024 repeat=1/5 implementation=v00
+  status=success tflops=39.9458
+size=1024 repeat=1/5 implementation=v01
+  status=success tflops=38.7787
+size=1024 repeat=1/5 implementation=v02
+  status=success tflops=39.7489
+size=1024 repeat=1/5 implementation=v03
+  status=success tflops=42.7641
+size=1024 repeat=1/5 implementation=v04
+  status=success tflops=45.3536
+size=1024 repeat=1/5 implementation=v05
+  status=success tflops=45.2558
+size=1024 repeat=1/5 implementation=v06
+  status=success tflops=49.985
+size=1024 repeat=1/5 implementation=v07
+  status=success tflops=50.4608
+size=1024 repeat=1/5 implementation=v08
+  status=success tflops=50.8516
+size=1024 repeat=1/5 implementation=latest
+  status=success tflops=50.7048
+size=1024 repeat=2/5 implementation=latest
+  status=success tflops=50.7739
+size=1024 repeat=2/5 implementation=v08
+  status=success tflops=50.8216
+size=1024 repeat=2/5 implementation=v07
+  status=success tflops=50.607
+size=1024 repeat=2/5 implementation=v06
+  status=success tflops=50.3639
+size=1024 repeat=2/5 implementation=v05
+  status=success tflops=40.5801
+size=1024 repeat=2/5 implementation=v04
+  status=success tflops=41.8928
+size=1024 repeat=2/5 implementation=v03
+  status=success tflops=42.2286
+size=1024 repeat=2/5 implementation=v02
+  status=success tflops=42.8865
+size=1024 repeat=2/5 implementation=v01
+  status=success tflops=42.9217
+size=1024 repeat=2/5 implementation=v00
+  status=success tflops=45.5513
+size=1024 repeat=2/5 implementation=official_cutlass
+  status=success tflops=50.1029
+size=1024 repeat=3/5 implementation=official_cutlass
+  status=success tflops=50.0514
+size=1024 repeat=3/5 implementation=v00
+  status=success tflops=45.4126
+size=1024 repeat=3/5 implementation=v01
+  status=success tflops=44.1506
+size=1024 repeat=3/5 implementation=v02
+  status=success tflops=44.132
+size=1024 repeat=3/5 implementation=v03
+  status=success tflops=47.3184
+size=1024 repeat=3/5 implementation=v04
+  status=success tflops=46.1724
+size=1024 repeat=3/5 implementation=v05
+  status=success tflops=42.5558
+size=1024 repeat=3/5 implementation=v06
+  status=success tflops=50.5597
+size=1024 repeat=3/5 implementation=v07
+  status=success tflops=50.607
+size=1024 repeat=3/5 implementation=v08
+  status=success tflops=50.7539
+size=1024 repeat=3/5 implementation=latest
+  status=success tflops=50.6872
+size=1024 repeat=4/5 implementation=latest
+  status=success tflops=50.8524
+size=1024 repeat=4/5 implementation=v08
+  status=success tflops=50.7048
+size=1024 repeat=4/5 implementation=v07
+  status=success tflops=51.007
+size=1024 repeat=4/5 implementation=v06
+  status=success tflops=50.5582
+size=1024 repeat=4/5 implementation=v05
+  status=success tflops=46.3357
+size=1024 repeat=4/5 implementation=v04
+  status=success tflops=46.3972
+size=1024 repeat=4/5 implementation=v03
+  status=success tflops=47.0847
+size=1024 repeat=4/5 implementation=v02
+  status=success tflops=44.132
+size=1024 repeat=4/5 implementation=v01
+  status=success tflops=44.1465
+size=1024 repeat=4/5 implementation=v00
+  status=success tflops=45.4519
+size=1024 repeat=4/5 implementation=official_cutlass
+  status=success tflops=50.1246
+size=1024 repeat=5/5 implementation=official_cutlass
+  status=success tflops=50.0536
+size=1024 repeat=5/5 implementation=v00
+  status=success tflops=45.5111
+size=1024 repeat=5/5 implementation=v01
+  status=success tflops=44.2064
+size=1024 repeat=5/5 implementation=v02
+  status=success tflops=38.793
+size=1024 repeat=5/5 implementation=v03
+  status=success tflops=45.576
+size=1024 repeat=5/5 implementation=v04
+  status=success tflops=44.7727
+size=1024 repeat=5/5 implementation=v05
+  status=success tflops=45.1583
+size=1024 repeat=5/5 implementation=v06
+  status=success tflops=48.7518
+size=1024 repeat=5/5 implementation=v07
+  status=success tflops=48.8847
+size=1024 repeat=5/5 implementation=v08
+  status=success tflops=49.2296
+size=1024 repeat=5/5 implementation=latest
+  status=success tflops=49.9099
+size=2048 repeat=1/5 implementation=official_cutlass
+  status=success tflops=66.8681
+size=2048 repeat=1/5 implementation=v00
+  status=success tflops=63.6897
+size=2048 repeat=1/5 implementation=v01
+  status=success tflops=61.2218
+size=2048 repeat=1/5 implementation=v02
+  status=success tflops=55.21
+size=2048 repeat=1/5 implementation=v03
+  status=success tflops=61.1548
+size=2048 repeat=1/5 implementation=v04
+  status=success tflops=60.9283
+size=2048 repeat=1/5 implementation=v05
+  status=success tflops=60.9229
+size=2048 repeat=1/5 implementation=v06
+  status=success tflops=62.1609
+size=2048 repeat=1/5 implementation=v07
+  status=success tflops=62.4026
+size=2048 repeat=1/5 implementation=v08
+  status=success tflops=62.4199
+size=2048 repeat=1/5 implementation=latest
+  status=success tflops=62.4524
+size=2048 repeat=2/5 implementation=latest
+  status=success tflops=62.3743
+size=2048 repeat=2/5 implementation=v08
+  status=success tflops=62.4199
+size=2048 repeat=2/5 implementation=v07
+  status=success tflops=62.4385
+size=2048 repeat=2/5 implementation=v06
+  status=success tflops=62.1563
+size=2048 repeat=2/5 implementation=v05
+  status=success tflops=60.9239
+size=2048 repeat=2/5 implementation=v04
+  status=success tflops=60.9496
+size=2048 repeat=2/5 implementation=v03
+  status=success tflops=61.1873
+size=2048 repeat=2/5 implementation=v02
+  status=success tflops=55.1882
+size=2048 repeat=2/5 implementation=v01
+  status=success tflops=55.1773
+size=2048 repeat=2/5 implementation=v00
+  status=success tflops=57.3658
+size=2048 repeat=2/5 implementation=official_cutlass
+  status=success tflops=62.2577
+size=2048 repeat=3/5 implementation=official_cutlass
+  status=success tflops=62.2346
+size=2048 repeat=3/5 implementation=v00
+  status=success tflops=57.3937
+size=2048 repeat=3/5 implementation=v01
+  status=success tflops=55.2027
+size=2048 repeat=3/5 implementation=v02
+  status=success tflops=55.2136
+size=2048 repeat=3/5 implementation=v03
+  status=success tflops=61.1516
+size=2048 repeat=3/5 implementation=v04
+  status=success tflops=60.9018
+size=2048 repeat=3/5 implementation=v05
+  status=success tflops=60.8984
+size=2048 repeat=3/5 implementation=v06
+  status=success tflops=62.1882
+size=2048 repeat=3/5 implementation=v07
+  status=success tflops=62.4431
+size=2048 repeat=3/5 implementation=v08
+  status=success tflops=62.4199
+size=2048 repeat=3/5 implementation=latest
+  status=success tflops=62.397
+size=2048 repeat=4/5 implementation=latest
+  status=success tflops=62.4524
+size=2048 repeat=4/5 implementation=v08
+  status=success tflops=62.4989
+size=2048 repeat=4/5 implementation=v07
+  status=success tflops=62.5036
+size=2048 repeat=4/5 implementation=v06
+  status=success tflops=62.1839
+size=2048 repeat=4/5 implementation=v05
+  status=success tflops=60.9464
+size=2048 repeat=4/5 implementation=v04
+  status=success tflops=60.9948
+size=2048 repeat=4/5 implementation=v03
+  status=success tflops=61.2531
+size=2048 repeat=4/5 implementation=v02
+  status=success tflops=55.25
+size=2048 repeat=4/5 implementation=v01
+  status=success tflops=56.6989
+size=2048 repeat=4/5 implementation=v00
+  status=success tflops=58.8922
+size=2048 repeat=4/5 implementation=official_cutlass
+  status=success tflops=63.9584
+size=2048 repeat=5/5 implementation=official_cutlass
+  status=success tflops=63.9181
+size=2048 repeat=5/5 implementation=v00
+  status=success tflops=57.3856
+size=2048 repeat=5/5 implementation=v01
+  status=success tflops=55.2729
+size=2048 repeat=5/5 implementation=v02
+  status=success tflops=55.2784
+size=2048 repeat=5/5 implementation=v03
+  status=success tflops=61.1689
+size=2048 repeat=5/5 implementation=v04
+  status=success tflops=60.9821
+size=2048 repeat=5/5 implementation=v05
+  status=success tflops=60.9327
+size=2048 repeat=5/5 implementation=v06
+  status=success tflops=62.23
+size=2048 repeat=5/5 implementation=v07
+  status=success tflops=62.4896
+size=2048 repeat=5/5 implementation=v08
+  status=success tflops=62.5269
+size=2048 repeat=5/5 implementation=latest
+  status=success tflops=62.4943
+size=4096 repeat=1/5 implementation=official_cutlass
+  status=success tflops=54.2241
+size=4096 repeat=1/5 implementation=v00
+  status=success tflops=52.1444
+size=4096 repeat=1/5 implementation=v01
+  status=success tflops=50.857
+size=4096 repeat=1/5 implementation=v02
+  status=success tflops=50.9144
+size=4096 repeat=1/5 implementation=v03
+  status=success tflops=52.8566
+size=4096 repeat=1/5 implementation=v04
+  status=success tflops=53.3711
+size=4096 repeat=1/5 implementation=v05
+  status=success tflops=53.0376
+size=4096 repeat=1/5 implementation=v06
+  status=success tflops=53.5185
+size=4096 repeat=1/5 implementation=v07
+  status=success tflops=53.4941
+size=4096 repeat=1/5 implementation=v08
+  status=success tflops=53.4442
+size=4096 repeat=1/5 implementation=latest
+  status=success tflops=53.4975
+size=4096 repeat=2/5 implementation=latest
+  status=success tflops=53.394
+size=4096 repeat=2/5 implementation=v08
+  status=success tflops=53.3763
+size=4096 repeat=2/5 implementation=v07
+  status=success tflops=53.3829
+size=4096 repeat=2/5 implementation=v06
+  status=success tflops=53.4783
+size=4096 repeat=2/5 implementation=v05
+  status=success tflops=53.3372
+size=4096 repeat=2/5 implementation=v04
+  status=success tflops=53.8547
+size=4096 repeat=2/5 implementation=v03
+  status=success tflops=53.0023
+size=4096 repeat=2/5 implementation=v02
+  status=success tflops=52.1509
+size=4096 repeat=2/5 implementation=v01
+  status=success tflops=51.7716
+size=4096 repeat=2/5 implementation=v00
+  status=success tflops=52.641
+size=4096 repeat=2/5 implementation=official_cutlass
+  status=success tflops=53.8806
+size=4096 repeat=3/5 implementation=official_cutlass
+  status=success tflops=53.7628
+size=4096 repeat=3/5 implementation=v00
+  status=success tflops=52.6118
+size=4096 repeat=3/5 implementation=v01
+  status=success tflops=51.7848
+size=4096 repeat=3/5 implementation=v02
+  status=success tflops=51.5556
+size=4096 repeat=3/5 implementation=v03
+  status=success tflops=52.917
+size=4096 repeat=3/5 implementation=v04
+  status=success tflops=53.4408
+size=4096 repeat=3/5 implementation=v05
+  status=success tflops=53.308
+size=4096 repeat=3/5 implementation=v06
+  status=success tflops=53.3764
+size=4096 repeat=3/5 implementation=v07
+  status=success tflops=53.4298
+size=4096 repeat=3/5 implementation=v08
+  status=success tflops=53.4542
+size=4096 repeat=3/5 implementation=latest
+  status=success tflops=53.3822
+size=4096 repeat=4/5 implementation=latest
+  status=success tflops=53.3997
+size=4096 repeat=4/5 implementation=v08
+  status=success tflops=53.4162
+size=4096 repeat=4/5 implementation=v07
+  status=success tflops=53.3882
+size=4096 repeat=4/5 implementation=v06
+  status=success tflops=53.3924
+size=4096 repeat=4/5 implementation=v05
+  status=success tflops=53.5911
+size=4096 repeat=4/5 implementation=v04
+  status=success tflops=52.9547
+size=4096 repeat=4/5 implementation=v03
+  status=success tflops=53.3839
+size=4096 repeat=4/5 implementation=v02
+  status=success tflops=51.7799
+size=4096 repeat=4/5 implementation=v01
+  status=success tflops=51.7018
+size=4096 repeat=4/5 implementation=v00
+  status=success tflops=52.547
+size=4096 repeat=4/5 implementation=official_cutlass
+  status=success tflops=54.1852
+size=4096 repeat=5/5 implementation=official_cutlass
+  status=success tflops=54.4322
+size=4096 repeat=5/5 implementation=v00
+  status=success tflops=52.5684
+size=4096 repeat=5/5 implementation=v01
+  status=success tflops=51.7672
+size=4096 repeat=5/5 implementation=v02
+  status=success tflops=51.7177
+size=4096 repeat=5/5 implementation=v03
+  status=success tflops=53.1913
+size=4096 repeat=5/5 implementation=v04
+  status=success tflops=53.3249
+size=4096 repeat=5/5 implementation=v05
+  status=success tflops=53.308
+size=4096 repeat=5/5 implementation=v06
+  status=success tflops=53.414
+size=4096 repeat=5/5 implementation=v07
+  status=success tflops=53.4017
+size=4096 repeat=5/5 implementation=v08
+  status=success tflops=53.4167
+size=4096 repeat=5/5 implementation=latest
+  status=success tflops=53.3639
+size=8192 repeat=1/5 implementation=official_cutlass
+  status=success tflops=48.7259
+size=8192 repeat=1/5 implementation=v00
+  status=success tflops=48.7867
+size=8192 repeat=1/5 implementation=v01
+  status=success tflops=47.9728
+size=8192 repeat=1/5 implementation=v02
+  status=success tflops=48.0694
+size=8192 repeat=1/5 implementation=v03
+  status=success tflops=49.1695
+size=8192 repeat=1/5 implementation=v04
+  status=success tflops=49.1818
+size=8192 repeat=1/5 implementation=v05
+  status=success tflops=49.096
+size=8192 repeat=1/5 implementation=v06
+  status=success tflops=49.4668
+size=8192 repeat=1/5 implementation=v07
+  status=success tflops=49.4762
+size=8192 repeat=1/5 implementation=v08
+  status=success tflops=49.4581
+size=8192 repeat=1/5 implementation=latest
+  status=success tflops=49.5031
+size=8192 repeat=2/5 implementation=latest
+  status=success tflops=49.4625
+size=8192 repeat=2/5 implementation=v08
+  status=success tflops=49.4309
+size=8192 repeat=2/5 implementation=v07
+  status=success tflops=49.4032
+size=8192 repeat=2/5 implementation=v06
+  status=success tflops=49.4167
+size=8192 repeat=2/5 implementation=v05
+  status=success tflops=49.0152
+size=8192 repeat=2/5 implementation=v04
+  status=success tflops=49.1242
+size=8192 repeat=2/5 implementation=v03
+  status=success tflops=49.096
+size=8192 repeat=2/5 implementation=v02
+  status=success tflops=48.1367
+size=8192 repeat=2/5 implementation=v01
+  status=success tflops=48.0344
+size=8192 repeat=2/5 implementation=v00
+  status=success tflops=48.8015
+size=8192 repeat=2/5 implementation=official_cutlass
+  status=success tflops=48.8998
+size=8192 repeat=3/5 implementation=official_cutlass
+  status=success tflops=48.9111
+size=8192 repeat=3/5 implementation=v00
+  status=success tflops=48.8897
+size=8192 repeat=3/5 implementation=v01
+  status=success tflops=48.0617
+size=8192 repeat=3/5 implementation=v02
+  status=success tflops=48.1824
+size=8192 repeat=3/5 implementation=v03
+  status=success tflops=49.1003
+size=8192 repeat=3/5 implementation=v04
+  status=success tflops=49.1075
+size=8192 repeat=3/5 implementation=v05
+  status=success tflops=49.0911
+size=8192 repeat=3/5 implementation=v06
+  status=success tflops=49.4843
+size=8192 repeat=3/5 implementation=v07
+  status=success tflops=49.5217
+size=8192 repeat=3/5 implementation=v08
+  status=success tflops=49.6354
+size=8192 repeat=3/5 implementation=latest
+  status=success tflops=49.5231
+size=8192 repeat=4/5 implementation=latest
+  status=success tflops=49.4875
+size=8192 repeat=4/5 implementation=v08
+  status=success tflops=49.6142
+size=8192 repeat=4/5 implementation=v07
+  status=success tflops=49.6099
+size=8192 repeat=4/5 implementation=v06
+  status=success tflops=49.5448
+size=8192 repeat=4/5 implementation=v05
+  status=success tflops=49.1167
+size=8192 repeat=4/5 implementation=v04
+  status=success tflops=49.1767
+size=8192 repeat=4/5 implementation=v03
+  status=success tflops=49.2243
+size=8192 repeat=4/5 implementation=v02
+  status=success tflops=48.1477
+size=8192 repeat=4/5 implementation=v01
+  status=success tflops=48.1926
+size=8192 repeat=4/5 implementation=v00
+  status=success tflops=48.8038
+size=8192 repeat=4/5 implementation=official_cutlass
+  status=success tflops=48.9939
+size=8192 repeat=5/5 implementation=official_cutlass
+  status=success tflops=48.9452
+size=8192 repeat=5/5 implementation=v00
+  status=success tflops=48.9321
+size=8192 repeat=5/5 implementation=v01
+  status=success tflops=48.1216
+size=8192 repeat=5/5 implementation=v02
+  status=success tflops=48.1084
+size=8192 repeat=5/5 implementation=v03
+  status=success tflops=49.1073
+size=8192 repeat=5/5 implementation=v04
+  status=success tflops=49.0634
+size=8192 repeat=5/5 implementation=v05
+  status=success tflops=49.0751
+size=8192 repeat=5/5 implementation=v06
+  status=success tflops=49.5617
+size=8192 repeat=5/5 implementation=v07
+  status=success tflops=49.3577
+size=8192 repeat=5/5 implementation=v08
+  status=success tflops=49.6126
+size=8192 repeat=5/5 implementation=latest
+  status=success tflops=49.6142
+{
+  "manifest_versions": 10,
+  "expected_versions_present": true,
+  "official_present": true,
+  "failures": 0,
+  "plots": [],
+  "report": "/sxs/cutlass-autopartitioner-3090/results/autopartitioner_3090_20260715_0525/AutoPartitioner_RTX3090_Report.md"
+}
+finished_utc=2026-07-15T10:35:32+00:00
+report=/sxs/cutlass-autopartitioner-3090/results/autopartitioner_3090_20260715_0525/AutoPartitioner_RTX3090_Report.md

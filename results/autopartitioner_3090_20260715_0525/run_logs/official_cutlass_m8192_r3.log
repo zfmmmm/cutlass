@@ -1,0 +1,22 @@
+COMMAND: /sxs/cutlass-autopartitioner-3090/results/autopartitioner_3090_20260715_0525/bin/sm80_cutlass_official_gemm --m=8192 --n=8192 --k=8192 --warmup=10 --iterations=50 --skip-reference
+
+SM80 CUTLASS official device::Gemm baseline
+  logical_mnk = 8192x8192x8192
+  padded_mnk  = 8192x8192x8192
+  warmup/iters = 10/50
+  input_seed   = 20260517
+  layouts      = A:row_major(M,K) B:row_major(K,N) C:row_major(M,N)
+  threadblock = 64x64x64
+  warp        = 32x32x64
+  instruction = 16x8x16
+  stages      = 1
+  alignments  = A8 / B8
+  input_a_hash = 10473616633057481402
+  input_b_hash = 17485738975420865771
+  output_sum   = 16835.4
+  output_abs_sum = 1.00976e+08
+  output_sq_sum = 2.38647e+08
+  output_hash  = 2022361619015266685
+  max_abs_diff = 0
+  runtime_ms   = 22.4798
+  tflops       = 48.9111

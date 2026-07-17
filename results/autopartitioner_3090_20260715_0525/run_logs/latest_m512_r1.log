@@ -1,0 +1,25 @@
+COMMAND: /sxs/cutlass-autopartitioner-3090/results/autopartitioner_3090_20260715_0525/bin/sm80_autopartition_gemm_latest --m=512 --n=512 --k=512 --warmup=10 --iterations=50
+
+SM80 AutoPartitioner cp.async/LDSM/mma.sync GEMM
+  logical_mnk = 512x512x512
+  padded_mnk  = 512x512x512
+  warmup/iters = 10/50
+  input_seed   = 20260517
+  layouts      = A:row_major(M,K) B:row_major(K,N) C:row_major(M,N)
+  threadblock = 64x64x64
+  warp        = autopartitioner
+  instruction = 16x8x16
+  stages      = 1
+  alignments  = A8 / B8
+  input_a_hash = 8929937084902417292
+  input_b_hash = 16353718496964745992
+  output_sum   = -325.578
+  output_abs_sum = 98608.6
+  output_sq_sum = 58251.8
+  output_hash  = 2368982924157930028
+  max_abs_diff = 3.8147e-06
+  runtime_ms   = 0.010752
+  tflops       = 24.9661
+  cp.async_zfill_false_predicate = 0
+NCU bank-conflict probe:
+  ncu --metrics l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum,l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum ./sm80_autopartition_gemm --print-layouts
