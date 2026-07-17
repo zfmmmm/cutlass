@@ -15,6 +15,7 @@ class RemoteWrapperTest(unittest.TestCase):
         self.assertIn("--repeat-runs 5", text)
         self.assertIn("nvidia-smi", text)
         self.assertIn('bin/nvcc" --version', text)
+        self.assertIn("validation/autopartitioner_3090/results_", text)
         self.assertNotIn("rm -rf", text)
 
 

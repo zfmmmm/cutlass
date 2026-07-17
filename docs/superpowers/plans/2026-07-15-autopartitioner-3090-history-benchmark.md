@@ -96,7 +96,7 @@
 
 **Files:**
 - Create remotely: `/sxs/cutlass-autopartitioner-3090`
-- Create locally: `results/autopartitioner_3090_<UTC timestamp>/`
+- Create locally: `validation/autopartitioner_3090/results_<UTC timestamp>/`
 
 **Interfaces:**
 - Consumes: the committed benchmark worktree.

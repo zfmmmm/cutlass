@@ -3,7 +3,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 timestamp="$(date -u +%Y%m%d_%H%M%S)"
-result_dir="${1:-${repo_root}/results/autopartitioner_3090_${timestamp}}"
+result_dir="${1:-${repo_root}/validation/autopartitioner_3090/results_${timestamp}}"
 mkdir -p "${result_dir}"
 
 exec > >(tee -a "${result_dir}/pipeline.log") 2>&1

@@ -46,7 +46,7 @@ The local Git history and benchmark worktree are packaged and uploaded to `/sxs/
 
 ## Outputs
 
-Remote and copied-back outputs live under `results/autopartitioner_3090_<UTC timestamp>/` and contain:
+Remote and copied-back outputs live under `validation/autopartitioner_3090/results_<UTC timestamp>/` and contain:
 
 - `version_manifest.json`
 - `environment.json` and `environment.txt`
